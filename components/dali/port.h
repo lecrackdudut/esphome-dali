@@ -18,6 +18,9 @@ static void delayMilliseconds(uint32_t delay_ms) {
 static uint32_t millis() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
+static uint32_t micros() {
+    return static_cast<uint32_t>(esp_timer_get_time());
+}
 static void enterCritical() {
     portDISABLE_INTERRUPTS();
 }

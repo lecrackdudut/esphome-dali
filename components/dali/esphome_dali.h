@@ -1,7 +1,9 @@
 #pragma once
 
-#include <esphome.h>
 #include <vector>
+#include "esphome/core/component.h"
+#include "esphome/core/gpio.h"
+#include "esphome/components/light/light_state.h"
 #include "dali.h"
 
 namespace esphome {
@@ -11,6 +13,20 @@ enum class DaliInitMode {
     DiscoverOnly,
     InitializeUnassigned,
     InitializeAll
+};
+
+/// @brief State shared between the RX edge-interrupt handler and the main code.
+/// The ISR decodes the bi-phase (Manchester) encoded backward frame into
+/// a stream of 2-bit symbols stored in `frame`.
+struct DaliInterruptState {
+    volatile uint32_t frame;
+    volatile uint32_t bitcount;
+    volatile uint32_t timestamp;
+
+    ISRInternalGPIOPin rx_pin;
+
+    static void gpio_intr(DaliInterruptState* state);
+    void reset();
 };
 
 class DaliBusComponent : public Component, public DaliPort {
@@ -25,7 +41,7 @@ public:
     void dump_config() override;
 
     void set_tx_pin(GPIOPin* tx_pin) { m_txPin = tx_pin; }
-    void set_rx_pin(GPIOPin* rx_pin) { m_rxPin = rx_pin; }
+    void set_rx_pin(InternalGPIOPin* rx_pin) { m_rxPin = rx_pin; }
 
     /// @brief Perform automatic device discovery on setup.
     /// Light components will automatically be created and appear in HomeAssistant
@@ -58,12 +74,17 @@ public: // DaliPort
 private:
     void writeBit(bool bit);
     void writeByte(uint8_t b);
-    uint8_t readByte();
+
+    void armInterrupt();
+    void disarmInterrupt();
 
     void create_light_component(short_addr_t short_addr, uint32_t long_addr);
 
-    GPIOPin* m_rxPin;
+    InternalGPIOPin* m_rxPin;
     GPIOPin* m_txPin;
+    uint32_t m_last_rx_ts = 0;
+
+    DaliInterruptState m_interrupt_state;
 
     bool m_discovery = false;
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;

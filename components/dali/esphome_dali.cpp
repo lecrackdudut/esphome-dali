@@ -29,9 +29,97 @@ public:
 
 }  // namespace
 
+// Interrupt-driven bi-phase receiver, ported from sehraf/esphome-dali
+// (branch gpio_interrupt), itself based on petrinm/ESP32Dali.
+//
+// One bit on the DALI bus is 833.33us (1200 baud), i.e. 2 TE half-bit periods.
+
+#define TE (417)                                // half bit time in us
+
+// Relaxed receive timing (strict spec would be TE +/- 42us, 2TE +/- 83us)
+#define MIN_TE      (300)                       // minimum half bit time
+#define MAX_TE      (550)                       // maximum half bit time
+#define MIN_2TE     (2*TE - (2*(TE/5)))         // minimum full bit time
+#define MAX_2TE     (2*TE + (2*(TE/5)))         // maximum full bit time
+
+// Each received half-bit level is stored as a 2-bit symbol in DaliInterruptState::frame
+#define BI_PHASE_HIGH   0b01
+#define BI_PHASE_LOW    0b10
+#define BI_PHASE_MASK   0b11
+
+#define BACKWARD_FRAME_BIT_LENGTH 18            // (1 start bit + 8 data bits) * 2 symbols per bit
+
+void IRAM_ATTR DaliInterruptState::gpio_intr(DaliInterruptState* state) {
+    if (state->bitcount >= BACKWARD_FRAME_BIT_LENGTH) {
+        // Already received enough bits
+        return;
+    }
+
+    // Read pin state and timestamp
+    uint32_t ts = micros();
+    bool level = state->rx_pin.digital_read();
+
+    if (state->timestamp == 0) {
+        // First edge: start bit (should be low)
+        state->frame <<= 1;
+        state->frame |= level ? BI_PHASE_HIGH : 0;
+        state->bitcount++;
+    } else {
+        // Ongoing reception: classify the pulse width as TE or 2TE
+        uint32_t diff = ts - state->timestamp;
+
+        if (MIN_2TE < diff && diff < MAX_2TE) {
+            // 2TE pulse: shift two identical symbols
+            state->frame <<= 2;
+            state->frame |= level ? BI_PHASE_HIGH : BI_PHASE_LOW;
+            state->bitcount += 2;
+        } else if (MIN_TE < diff && diff < MAX_TE) {
+            // TE pulse: shift one symbol matching the current level
+            state->frame <<= 1;
+            if (level) {
+                state->frame |= BI_PHASE_HIGH;
+            }
+            state->bitcount += 1;
+        } else {
+            // Not a valid DALI bi-phase pulse: abort reception.
+            // receiveBackwardFrame() will reject the zeroed frame.
+            state->bitcount = BACKWARD_FRAME_BIT_LENGTH;
+            state->frame = 0;
+        }
+    }
+
+    // Save timestamp for next edge
+    state->timestamp = ts;
+}
+
+void DaliInterruptState::reset() {
+    this->frame = 0;
+    this->bitcount = 0;
+    this->timestamp = 0;
+}
+
+// Prints the DALI QUERY_STATUS (0x90) response in a human-readable format
+static void print_dali_status(uint8_t status, uint8_t address) {
+    DALI_LOGI("DALI[%.2d] Status: %s | %s | %s | %s | %s | %s | %s | %s",
+        address,
+        (status & STATUS_BALLAST_OK) ? "Gear Failed" : "Gear OK",
+        (status & STATUS_LAMP_FAILURE) ? "Lamp Failed" : "Lamp OK",
+        (status & STATUS_LAMP_ON) ? "Lamp On" : "Lamp Off",
+        (status & STATUS_LIMIT_ERROR) ? "Limit Error" : "Level OK",
+        (status & STATUS_FADE_STATE) ? "Fading" : "Not Fading",
+        (status & STATUS_RESET_STATE) ? "Reset State" : "Not Reset",
+        (status & STATUS_MISSING_SHORT_ADDRESS) ? "No Address" : "Address OK",
+        (status & STATUS_POWER_FAILURE) ? "Power Failure" : "Power OK");
+}
+
 void DaliBusComponent::setup() {
     m_txPin->pin_mode(gpio::Flags::FLAG_OUTPUT);
     m_rxPin->pin_mode(gpio::Flags::FLAG_INPUT);
+
+    m_interrupt_state.rx_pin = m_rxPin->to_isr();
+    m_interrupt_state.reset();
+    this->armInterrupt();
+
     DALI_LOGI("DALI bus ready");
 
     if (m_discovery) {
@@ -114,6 +202,9 @@ void DaliBusComponent::setup() {
                 // Withdraw after address is confirmed (spec order: find → program → withdraw)
                 dali.bus_manager.withdrawCurrentDevice();
 
+                uint8_t status = dali.port.sendQueryCommand(short_addr, DaliCommand::QUERY_STATUS);
+                print_dali_status(status, short_addr);
+
                 // Dynamic component creation (if not defined in YAML)
                 if (m_addresses[short_addr]) {
                     DALI_LOGD("  Ignoring, already defined");
@@ -145,6 +236,9 @@ void DaliBusComponent::setup() {
                     dali.bus_manager.withdrawCurrentDevice();
 
                     DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
+
+                    uint8_t status = dali.port.sendQueryCommand(short_addr, DaliCommand::QUERY_STATUS);
+                    print_dali_status(status, short_addr);
                 }
             }
         }
@@ -229,6 +323,14 @@ void DaliBusComponent::dump_config() {
     }
 }
 
+void DaliBusComponent::armInterrupt() {
+    m_rxPin->attach_interrupt(DaliInterruptState::gpio_intr, &m_interrupt_state, gpio::INTERRUPT_ANY_EDGE);
+}
+
+void DaliBusComponent::disarmInterrupt() {
+    m_rxPin->detach_interrupt();
+}
+
 #define QUARTER_BIT_PERIOD 208
 #define HALF_BIT_PERIOD 416
 #define BIT_PERIOD 833
@@ -248,16 +350,6 @@ void DaliBusComponent::writeByte(uint8_t b) {
     }
 }
 
-uint8_t DaliBusComponent::readByte() {
-    uint8_t byte = 0;
-    for (int i = 0; i < 8; i++) {
-        byte <<= 1;
-        byte |= m_rxPin->digital_read();
-        delayMicroseconds(BIT_PERIOD); // 1/1200 seconds
-    }
-    return byte;
-}
-
 void DaliBusComponent::resetBus() {
     DALI_LOGD("Resetting bus");
     m_txPin->digital_write(HIGH);
@@ -269,8 +361,19 @@ void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
     if (DEBUG_LOG_RXTX) {
         DALI_LOGD("TX: %02x %02x", address, data);
         delayMicroseconds(BIT_PERIOD*8);
-        //Serial.print("TX: "); Serial.print(address, HEX); Serial.print(" "); Serial.println(data, HEX);
     }
+
+    // Minimum idle time since the previous frame before we may transmit
+    // (>= 22 TE between two forward frames, ~9.2ms)
+    const uint32_t min_idle_ms = ((HALF_BIT_PERIOD * 22) / 1000) + 1;
+    uint32_t elapsed_ms = millis() - m_last_rx_ts;
+    if (elapsed_ms < min_idle_ms) {
+        delayMilliseconds(min_idle_ms - elapsed_ms);
+    }
+
+    // Don't receive our own transmission
+    this->disarmInterrupt();
+    m_interrupt_state.reset();
 
     {
         // This is timing critical
@@ -284,40 +387,56 @@ void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
 
     // Non critical delay
     delayMicroseconds(HALF_BIT_PERIOD*2);
+    this->armInterrupt();
+    m_last_rx_ts = millis();
     delayMicroseconds(BIT_PERIOD*4); // Optional, for clarity in scope trace
 }
 
 uint8_t DaliBusComponent::receiveBackwardFrame(unsigned long timeout_ms) {
-    uint8_t data;
+    uint8_t data = 0;
 
-    unsigned long startTime = millis();
-
-    // Wait for START bit (timing critical)
-    // TODO: Need a better way to wait for this that doesn't block the CPU
-    while (m_rxPin->digital_read() == LOW) {
-        if (millis() - startTime >= timeout_ms) {
+    // Wait until the RX interrupt has captured a complete backward frame
+    uint32_t start_time = millis();
+    while (m_interrupt_state.bitcount < BACKWARD_FRAME_BIT_LENGTH) {
+        delayMilliseconds(1);
+        if (millis() - start_time > timeout_ms) {
             if (DEBUG_LOG_RXTX) {
-                DALI_LOGD("RX: 00 (NACK)");
+                DALI_LOGD("RX: timeout (NACK)");
             }
             return 0;
         }
     }
 
-    {
-        // This is timing critical
-        InterruptLock lock;
+    uint32_t raw_data = m_interrupt_state.frame;
+    m_interrupt_state.reset();
 
-        delayMicroseconds(BIT_PERIOD); // Wait for first data bit
-        delayMicroseconds(QUARTER_BIT_PERIOD); // Wait a quater bit period to sample middle of first half bit
-        data = readByte();
-        delayMicroseconds(BIT_PERIOD*2); // Wait for STOP bits
+    if (DEBUG_LOG_RXTX) {
+        DALI_LOGD("RX raw: %05x", raw_data);
+    }
+
+    // Decode the 2-bit bi-phase symbols into a byte (LSB symbol pair first)
+    for (int i = 0; i < 8; i++) {
+        data >>= 1;
+        switch (raw_data & BI_PHASE_MASK) {
+        case BI_PHASE_HIGH:
+            data |= 0x80;
+            break;
+        case BI_PHASE_LOW:
+            break;
+        default:
+            // Invalid symbol (aborted or corrupted frame)
+            return 0;
+        }
+        raw_data >>= 2;
     }
 
     if (DEBUG_LOG_RXTX) {
         DALI_LOGD("RX: %02x", data);
     }
 
+    m_last_rx_ts = millis();
+
     // Minimum time before we can send another forward frame
-    delayMicroseconds(BIT_PERIOD*8); 
+    delayMicroseconds(BIT_PERIOD*7);
     return data;
 }
