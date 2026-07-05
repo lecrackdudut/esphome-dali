@@ -280,7 +280,7 @@ void DaliBusComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "DALI Bus:");
     LOG_PIN("  TX Pin: ", m_txPin);
     LOG_PIN("  RX Pin: ", m_rxPin);
-    ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz)");
+    ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz), driver v2");
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
     if (m_discovery) {
         const char *init_mode = "discover only";
