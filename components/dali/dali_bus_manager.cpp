@@ -78,6 +78,7 @@ void DaliBusManager::startAddressScan() {
         this->_is_scanning = true;
         // Put all devices on the bus into initialization mode, where they will accept special commands
         initialize(0);
+        delayMilliseconds(100);
     }
 }
 

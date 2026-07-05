@@ -371,7 +371,7 @@ DaliBusManager(DaliPort& port)
 
         port.sendSpecialCommand(DaliSpecialCommand::COMPARE, 0);
 
-        const unsigned long timeout_ms = 10;
+        const unsigned long timeout_ms = 25;
         return (port.receiveBackwardFrame(timeout_ms) == 0xFF);
     }
 

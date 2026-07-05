@@ -135,6 +135,9 @@ void DaliBusComponent::setup() {
         DALI_LOGI("Begin device discovery...");
         dali.bus_manager.startAddressScan();
 
+        // COMPARE probe (devices must be in INITIALISE mode from startAddressScan)
+        this->m_discovery_compare_ok = dali.bus_manager.compareSearchAddress(0xFFFFFF);
+
         bool duplicate_detected = false;
         bool is_discovered[ADDR_SHORT_MAX+1];
         for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
@@ -146,6 +149,7 @@ void DaliBusComponent::setup() {
         uint32_t long_addr = 0;
         while (dali.bus_manager.findNextAddress(short_addr, long_addr)) {
             count++;
+            this->m_discovery_devices_found = count;
             delay(1);
             esp_task_wdt_reset();
 
@@ -181,6 +185,7 @@ void DaliBusComponent::setup() {
                 else {
                     m_addresses[short_addr] = long_addr;
                     create_light_component(short_addr, long_addr);
+                    this->m_discovery_lights_created++;
                 }
             }
             else if (short_addr == 0xFF) {
@@ -204,6 +209,11 @@ void DaliBusComponent::setup() {
                     dali.bus_manager.withdrawCurrentDevice();
 
                     DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
+                    if (m_addresses[short_addr] == 0) {
+                        m_addresses[short_addr] = long_addr;
+                        create_light_component(short_addr, long_addr);
+                        this->m_discovery_lights_created++;
+                    }
                 }
             }
         }
@@ -272,6 +282,18 @@ void DaliBusComponent::dump_config() {
     LOG_PIN("  RX Pin: ", m_rxPin);
     ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz)");
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
+    if (m_discovery) {
+        const char *init_mode = "discover only";
+        if (m_initialize_addresses == DaliInitMode::InitializeAll) {
+            init_mode = "initialize all";
+        } else if (m_initialize_addresses == DaliInitMode::InitializeUnassigned) {
+            init_mode = "initialize unassigned";
+        }
+        ESP_LOGCONFIG(TAG, "  Initialize addresses: %s", init_mode);
+        ESP_LOGCONFIG(TAG, "  COMPARE probe: %s", m_discovery_compare_ok ? "ok" : "failed");
+        ESP_LOGCONFIG(TAG, "  Devices found: %u", m_discovery_devices_found);
+        ESP_LOGCONFIG(TAG, "  Lights created: %u", m_discovery_lights_created);
+    }
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {

@@ -75,6 +75,10 @@ private:
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 
+    uint8_t m_discovery_devices_found{0};
+    uint8_t m_discovery_lights_created{0};
+    bool m_discovery_compare_ok{false};
+
     // Dynamic lights created during discovery are not in ESPHome's looping_components_
     // (that list is fixed at compile time). We drive their loop() manually.
     std::vector<esphome::light::LightState*> m_dynamic_lights;

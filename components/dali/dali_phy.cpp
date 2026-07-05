@@ -145,6 +145,10 @@ uint8_t DaliPhy::tx(uint8_t *data, uint8_t bitlen) {
   this->txspcnt = 0;
   this->txcollision = 0;
   this->rxstate = EMPTY;
+  this->rxpos = 0;
+  this->rxbitcnt = 0;
+  this->rxidle = 0;
+  this->rxbyte = 0;
   this->busstate = TX;
   return DALI_PHY_OK;
 }
