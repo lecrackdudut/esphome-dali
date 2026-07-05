@@ -18,7 +18,7 @@
     ],
     "build": {
         "srcDir": ".",
-        "srcFilter": "+<*> -<esphome_*> -<output/> -<light/>"
+        "srcFilter": "+<*> -<esphome_*> -<dali_phy.cpp> -<output/> -<light/>"
     },
     "platforms": "*"
 }
