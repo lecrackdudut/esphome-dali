@@ -1,5 +1,6 @@
 
 #include <esphome.h>
+#include <esp_task_wdt.h>
 #include "esphome_dali_light.h"
 #include "esphome/core/log.h"
 
@@ -29,6 +30,8 @@ void DaliLight::initial_state_trampoline(LightStateRTCState &s) {
 }
 
 void dali::DaliLight::setup_state(light::LightState *state) {
+    esp_task_wdt_reset();
+
     // Initialization code for DaliLight
 
     // Exclude broadcast and group addresses

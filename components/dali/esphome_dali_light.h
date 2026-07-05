@@ -38,12 +38,12 @@ class DaliLight : public light::LightOutput, public Component {
     void setup_state(light::LightState *state) override;
     void write_state(light::LightState *state) override;
 
-    void set_address(uint8_t address) { 
-        address_ = address; 
+    void set_address(uint8_t address, bool reserve_for_yaml = true) {
+        address_ = address;
 
-        // Prevent dynamic creation of lights with this address
-        // (when device discovery is enabled)
-        if (this->address_ <= ADDR_SHORT_MAX) {
+        // Reserve the short address so discovery won't create a duplicate.
+        // Dynamic (discovery) lights pass reserve_for_yaml=false — long addr is stored separately.
+        if (reserve_for_yaml && this->address_ <= ADDR_SHORT_MAX) {
             bus->register_static_addr(address_);
         }
     }

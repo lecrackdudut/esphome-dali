@@ -47,9 +47,19 @@ public:
     float get_setup_priority() const override { return esphome::setup_priority::HARDWARE; }
 
     void register_static_addr(short_addr_t short_addr) {
-        if (short_addr < ADDR_SHORT_MAX) {
+        if (short_addr <= ADDR_SHORT_MAX && m_addresses[short_addr] == 0) {
             m_addresses[short_addr] = 0xFFFFFF;
         }
+    }
+
+    void register_discovered_addr(short_addr_t short_addr, uint32_t long_addr) {
+        if (short_addr <= ADDR_SHORT_MAX) {
+            m_addresses[short_addr] = long_addr;
+        }
+    }
+
+    bool is_addr_reserved_yaml(short_addr_t short_addr) const {
+        return short_addr <= ADDR_SHORT_MAX && m_addresses[short_addr] == 0xFFFFFF;
     }
 
     DaliMaster dali;

@@ -179,11 +179,14 @@ void DaliBusComponent::setup() {
 
                 dali.bus_manager.withdrawCurrentDevice();
 
-                if (m_addresses[short_addr]) {
-                    DALI_LOGD("  Ignoring, already defined");
+                if (this->is_addr_reserved_yaml(short_addr)) {
+                    DALI_LOGD("  Ignoring, already defined in YAML");
+                }
+                else if (m_addresses[short_addr] != 0) {
+                    DALI_LOGD("  Ignoring, already discovered");
                 }
                 else {
-                    m_addresses[short_addr] = long_addr;
+                    this->register_discovered_addr(short_addr, long_addr);
                     create_light_component(short_addr, long_addr);
                     this->m_discovery_lights_created++;
                 }
@@ -209,8 +212,8 @@ void DaliBusComponent::setup() {
                     dali.bus_manager.withdrawCurrentDevice();
 
                     DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
-                    if (m_addresses[short_addr] == 0) {
-                        m_addresses[short_addr] = long_addr;
+                    if (!this->is_addr_reserved_yaml(short_addr) && m_addresses[short_addr] == 0) {
+                        this->register_discovered_addr(short_addr, long_addr);
                         create_light_component(short_addr, long_addr);
                         this->m_discovery_lights_created++;
                     }
@@ -240,13 +243,13 @@ void DaliBusComponent::on_shutdown() {
 void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t long_addr) {
 #ifdef USE_LIGHT
     DaliLight* dali_light = new DaliLight { this };
-    dali_light->set_address(short_addr);
+    dali_light->set_address(short_addr, false);
 
-    const int MAX_STR_LEN = 20;
+    const int MAX_STR_LEN = 32;
     char* name = new char[MAX_STR_LEN];
     char* id = new char[MAX_STR_LEN];
-    snprintf(name, MAX_STR_LEN, "DALI Light %d", short_addr);
-    snprintf(id, MAX_STR_LEN, "dali_light_%.6x", long_addr);
+    snprintf(name, MAX_STR_LEN, "DALI %.6x", static_cast<unsigned>(long_addr));
+    snprintf(id, MAX_STR_LEN, "dali_%.6x", static_cast<unsigned>(long_addr));
 
     auto* light_state = new DynamicDaliLightState { dali_light };
     light_state->configure_dynamic_entity(name, id, false);
@@ -256,14 +259,16 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
     light_state->set_restore_mode(light::LIGHT_RESTORE_DEFAULT_ON);
     light_state->add_effects({});
 
-    dali_light->setup_state(light_state);
+    // setup_state() runs when the LightState component starts (API/MQTT ready).
+    // Do not call it here — 18 immediate bus queries during bus setup can block
+    // entity registration and trip the watchdog.
 
     if (m_dynamic_lights.empty()) {
         this->enable_loop();
     }
     m_dynamic_lights.push_back(light_state);
 
-    DALI_LOGI("Created light component '%s' (%s)", name, id);
+    DALI_LOGI("Created light '%s' (%s) @ short %.2x", name, id, short_addr);
 #else
     DALI_LOGE("Not compiled with light component. Add `light:` to YAML.");
 #endif
@@ -297,7 +302,13 @@ void DaliBusComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
-        if (m_addresses[i] > 0) {
+        if (m_addresses[i] == 0xFFFFFF) {
+            if (!any) {
+                ESP_LOGCONFIG(TAG, "  Addresses (YAML):");
+                any = true;
+            }
+            ESP_LOGCONFIG(TAG, "    %.2u = yaml", i);
+        } else if (m_addresses[i] > 0) {
             if (!any) {
                 ESP_LOGCONFIG(TAG, "  Addresses:");
                 any = true;
