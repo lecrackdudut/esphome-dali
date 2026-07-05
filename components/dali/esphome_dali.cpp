@@ -253,7 +253,18 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 
     auto* light_state = new DynamicDaliLightState { dali_light };
     light_state->configure_dynamic_entity(name, id, false);
+
+    const size_t lights_before = App.get_lights().size();
     App.register_light(light_state);
+    if (App.get_lights().size() == lights_before) {
+        DALI_LOGE("Failed to register light '%s': entity slot limit reached (recompile with higher max_discovered_lights)", name);
+        delete light_state;
+        delete[] name;
+        delete[] id;
+        delete dali_light;
+        return;
+    }
+
     static_cast<AppRegistrationAccessor&>(App).register_component_(light_state);
 
     light_state->set_restore_mode(light::LIGHT_RESTORE_DEFAULT_ON);
