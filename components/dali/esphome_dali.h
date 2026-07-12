@@ -92,6 +92,7 @@ private:
     void stop_phy_timer();
     void create_light_component(short_addr_t short_addr, uint32_t long_addr);
     void run_deferred_bus_init();
+    void log_bus_diagnostics_();
     bool is_network_ready_() const;
 
     dali_phy::DaliPhy m_phy;

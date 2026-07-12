@@ -127,6 +127,29 @@ bool DaliBusComponent::is_network_ready_() const {
 #endif
 }
 
+void DaliBusComponent::log_bus_diagnostics_() {
+    const bool rx_high = this->m_rxPin->digital_read();
+    DALI_LOGW("  Diagnostic: RX pin = %s (DALI bus idle should read HIGH via opto)", rx_high ? "HIGH" : "LOW");
+
+    uint8_t found = 0;
+    for (short_addr_t addr = 0; addr <= ADDR_SHORT_MAX; addr++) {
+        if (dali.isDevicePresent(addr)) {
+            DALI_LOGW("  Diagnostic: control gear responds at short address %u", static_cast<unsigned>(addr));
+            found++;
+        }
+        if ((addr & 0x07) == 0x07) {
+            esp_task_wdt_reset();
+        }
+    }
+
+    if (found == 0) {
+        DALI_LOGW("  Diagnostic: no response on short addresses 0-63 (broadcast also failed)");
+        DALI_LOGW("  Check: DALI 16V PSU, DA/DA- wiring, tx_pin/rx_pin, opto TX polarity");
+    } else {
+        DALI_LOGW("  Diagnostic: %u device(s) respond individually but broadcast query failed", found);
+    }
+}
+
 void DaliBusComponent::run_deferred_bus_init() {
     DALI_LOGI("Starting DALI bus init...");
 
@@ -146,6 +169,7 @@ void DaliBusComponent::run_deferred_bus_init() {
             DALI_LOGI("Detected control gear on bus");
         } else {
             DALI_LOGE("No DALI control gear detected on bus!");
+            this->log_bus_diagnostics_();
             return;
         }
 
