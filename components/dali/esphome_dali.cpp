@@ -176,6 +176,12 @@ void DaliBusComponent::attempt_bus_recovery() {
     if (!this->m_phy.is_ready()) {
         DALI_LOGW("PHY not ready, re-initializing RMT");
         this->init_phy();
+        if (!this->m_phy.is_ready()) {
+            DALI_LOGE("PHY re-init failed — see dali.phy logs (no free RMT TX channels?)");
+            this->unlock_bus();
+            this->publish_diagnostics();
+            return;
+        }
     }
 
     this->resetBus();

@@ -27,6 +27,7 @@ dali:
 
 - **`invert_tx`**: Set to `true` when using an inverting opto driver (Waveshare Pico-DALI2). GPIO high asserts the bus (pulls line low).
 - **`invert_rx`**: Set to `true` if the RX opto inverts the sensed bus level.
+- **RMT channels**: DALI needs one TX and one RX RMT channel. On ESP32-S3 only four TX slots exist; disable other RMT users (`esp32_rmt_led_strip`, `remote_transmitter`, `remote_receiver`, `neopixelbus`) or they may cause `no free tx channels` at boot.
 
 ## Bus diagnostics
 

@@ -233,8 +233,8 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
   this->last_backward_data_ = 0;
   this->initialized_ = true;
 
-  ESP_LOGI(TAG, "RMT PHY ready (TX GPIO %d%s, RX GPIO %d%s)", tx_gpio, invert_tx ? " inv" : "", rx_gpio,
-           invert_rx ? " inv" : "");
+  ESP_LOGI(TAG, "RMT PHY ready (TX GPIO %d%s, RX GPIO %d%s, mem=%u sym)", tx_gpio, invert_tx ? " inv" : "", rx_gpio,
+           invert_rx ? " inv" : "", static_cast<unsigned>(DALI_DEFAULT_MEM_BLOCK));
   return true;
 }
 
@@ -291,13 +291,36 @@ bool DaliPhy::ensure_channels_created_() {
     return false;
   }
 
+  // Create TX before RX: on ESP32-S3 both share one RMT memory pool. RX at block 4
+  // can block a 2-block TX allocation at block 3; allocate TX first when slots are free.
+  rmt_tx_channel_config_t tx_channel_cfg = {};
+  tx_channel_cfg.gpio_num = static_cast<gpio_num_t>(this->tx_gpio_);
+  tx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+  tx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
+  tx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
+  tx_channel_cfg.trans_queue_depth = 1;
+  esp_err_t err = rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX channel on GPIO %d: %s", this->tx_gpio_, esp_err_to_name(err));
+    this->destroy_channels_();
+    return false;
+  }
+
+  const rmt_copy_encoder_config_t enc_cfg = {};
+  err = rmt_new_copy_encoder(&enc_cfg, &this->tx_encoder_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX copy encoder: %s", esp_err_to_name(err));
+    this->destroy_channels_();
+    return false;
+  }
+
   rmt_rx_channel_config_t rx_channel_cfg = {};
   rx_channel_cfg.gpio_num = static_cast<gpio_num_t>(this->rx_gpio_);
   rx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
   rx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
   rx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
   rx_channel_cfg.flags.invert_in = this->invert_rx_ ? 1U : 0U;
-  esp_err_t err = rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_);
+  err = rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create RX channel on GPIO %d: %s", this->rx_gpio_, esp_err_to_name(err));
     this->destroy_channels_();
@@ -316,27 +339,6 @@ bool DaliPhy::ensure_channels_created_() {
 
   this->rx_cfg_.signal_range_min_ns = us_to_ns(2);
   this->rx_cfg_.signal_range_max_ns = us_to_ns(2000);
-
-  rmt_tx_channel_config_t tx_channel_cfg = {};
-  tx_channel_cfg.gpio_num = static_cast<gpio_num_t>(this->tx_gpio_);
-  tx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
-  tx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
-  tx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
-  tx_channel_cfg.trans_queue_depth = 1;
-  err = rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create TX channel on GPIO %d: %s", this->tx_gpio_, esp_err_to_name(err));
-    this->destroy_channels_();
-    return false;
-  }
-
-  const rmt_copy_encoder_config_t enc_cfg = {};
-  err = rmt_new_copy_encoder(&enc_cfg, &this->tx_encoder_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create TX copy encoder: %s", esp_err_to_name(err));
-    this->destroy_channels_();
-    return false;
-  }
 
   return true;
 }
@@ -366,15 +368,15 @@ bool DaliPhy::enable_channels_() {
 }
 
 void DaliPhy::disable_channels_() {
-  if (this->tx_channel_ != nullptr && this->channels_enabled_) {
+  if (this->tx_channel_ != nullptr) {
     const esp_err_t err = rmt_disable(this->tx_channel_);
-    if (err != ESP_OK) {
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
       ESP_LOGW(TAG, "rmt_disable TX failed: %s", esp_err_to_name(err));
     }
   }
-  if (this->rx_channel_ != nullptr && this->channels_enabled_) {
+  if (this->rx_channel_ != nullptr) {
     const esp_err_t err = rmt_disable(this->rx_channel_);
-    if (err != ESP_OK) {
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
       ESP_LOGW(TAG, "rmt_disable RX failed: %s", esp_err_to_name(err));
     }
   }
