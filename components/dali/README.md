@@ -13,6 +13,7 @@ dali:
   id: dali_bus
   tx_pin: 32
   rx_pin: 33
+  boot_delay: 30s  # no DALI traffic until drivers are ready; default 30s
   discovery: true
   debug_tx_rx: false  # log every TX/RX frame (verbose)
   bus_status:

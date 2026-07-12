@@ -285,6 +285,34 @@ void DaliDiagTextSensor::loop() {
     this->parent_->publish_diagnostics();
 }
 
+void DaliBusComponent::wait_for_boot_delay() {
+    if (this->m_boot_delay_ms == 0) {
+        return;
+    }
+
+    DALI_LOGI("Waiting %u s for DALI drivers to initialize (no bus traffic)...", this->m_boot_delay_ms / 1000);
+
+    const uint32_t start_ms = millis();
+    uint32_t last_log_ms = start_ms;
+
+    while (millis() - start_ms < this->m_boot_delay_ms) {
+        esp_task_wdt_reset();
+        delay(100);
+
+        const uint32_t now_ms = millis();
+        if (now_ms - last_log_ms >= 5000) {
+            const uint32_t elapsed_s = (now_ms - start_ms) / 1000;
+            const uint32_t total_s = this->m_boot_delay_ms / 1000;
+            if (elapsed_s < total_s) {
+                DALI_LOGI("DALI boot delay: %u / %u s elapsed...", elapsed_s, total_s);
+            }
+            last_log_ms = now_ms;
+        }
+    }
+
+    DALI_LOGI("DALI boot delay finished, starting bus activity");
+}
+
 void DaliBusComponent::init_phy() {
     s_rx_gpio = pin_to_gpio(this->m_rxPin);
     s_tx_gpio = pin_to_gpio(this->m_txPin);
@@ -327,6 +355,8 @@ void DaliBusComponent::setup() {
     this->init_phy();
     this->start_phy_timer();
     DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
+
+    this->wait_for_boot_delay();
 
     this->resetBus();
     esp_task_wdt_reset();
@@ -525,6 +555,7 @@ void DaliBusComponent::dump_config() {
     LOG_PIN("  TX Pin: ", m_txPin);
     LOG_PIN("  RX Pin: ", m_rxPin);
     ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz), driver v2");
+    ESP_LOGCONFIG(TAG, "  Boot delay: %u ms", m_boot_delay_ms);
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
     if (m_discovery) {
         const char *init_mode = "discover only";

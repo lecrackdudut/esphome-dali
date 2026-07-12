@@ -73,6 +73,7 @@ public:
     void set_debug_tx_rx(bool enabled) { m_debug_tx_rx = enabled; }
     void set_bus_status_sensor(DaliBusStatusBinarySensor *sensor) { m_bus_status_sensor = sensor; }
     void set_diag_sensor(DaliDiagTextSensor *sensor) { m_diag_sensor = sensor; }
+    void set_boot_delay_ms(uint32_t boot_delay_ms) { m_boot_delay_ms = boot_delay_ms; }
 
     /// @brief Perform automatic device discovery on setup.
     /// Light components will automatically be created and appear in HomeAssistant
@@ -131,6 +132,7 @@ private:
     void ensure_bus_mutex();
     bool lock_bus(uint32_t timeout_ms = 600);
     void unlock_bus();
+    void wait_for_boot_delay();
     void update_bus_status_sensor(bool bus_ok);
     static const char *phy_busstate_name(uint8_t busstate);
 
@@ -145,6 +147,7 @@ private:
 
     bool m_discovery = false;
     bool m_debug_tx_rx = false;
+    uint32_t m_boot_delay_ms{30000};
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 

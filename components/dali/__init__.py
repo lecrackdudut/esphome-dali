@@ -15,6 +15,7 @@ CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
 CONF_DEBUG_TX_RX = 'debug_tx_rx'
+CONF_BOOT_DELAY = 'boot_delay'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
 DEFAULT_MAX_DISCOVERED_LIGHTS = 64
@@ -33,6 +34,7 @@ CONFIG_SCHEMA = cv.Schema({
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
     cv.Optional(CONF_DEBUG_TX_RX, default=False): cv.boolean,
+    cv.Optional(CONF_BOOT_DELAY, default="30s"): cv.positive_time_period_milliseconds,
     cv.Optional(dali_binary_sensor.CONF_BUS_STATUS): dali_binary_sensor.bus_status_schema(dali_ns),
     cv.Optional(dali_text_sensor.CONF_DIAG): dali_text_sensor.diag_schema(dali_ns),
 }).extend(cv.COMPONENT_SCHEMA)
@@ -49,6 +51,8 @@ async def to_code(config: OrderedDict):
 
     if config.get(CONF_DEBUG_TX_RX, False):
         cg.add(var.set_debug_tx_rx(True))
+
+    cg.add(var.set_boot_delay_ms(config[CONF_BOOT_DELAY]))
 
     if config.get(CONF_DISCOVERY, False):
         cg.add(var.do_device_discovery())
