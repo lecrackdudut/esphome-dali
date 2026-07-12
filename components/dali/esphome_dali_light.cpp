@@ -84,11 +84,11 @@ void dali::DaliLight::setup_state(light::LightState *state) {
 
             if (this->fade_rate_.has_value()) {
                 ESP_LOGD(TAG, "Setting fade rate: %d", this->fade_rate_.value());
-                bus->dali.lamp.setFadeRate(0, this->fade_rate_.value());
+                bus->dali.lamp.setFadeRate(address_, this->fade_rate_.value());
             }
             if (this->fade_time_.has_value()) {
                 ESP_LOGD(TAG, "Setting fade time: %d", this->fade_time_.value());
-                bus->dali.lamp.setFadeTime(0, this->fade_time_.value());
+                bus->dali.lamp.setFadeTime(address_, this->fade_time_.value());
             }
 
             // bus->dali.lamp.setMinLevel(address_, 1);
@@ -186,8 +186,6 @@ void dali::DaliLight::write_state(light::LightState *state) {
     float brightness;
     float color_temperature;
 
-    static uint16_t last_temperature = 0;
-
     state->current_values_as_binary(&on);
     if (!on) {
         // Short cut: send power off command
@@ -206,8 +204,8 @@ void dali::DaliLight::write_state(light::LightState *state) {
         uint16_t dali_color_temperature = static_cast<uint16_t>(color_temperature_mired);
 
         // Only update if temperature has changed, to allow faster brightness changes
-        if (dali_color_temperature != last_temperature) {
-            last_temperature = dali_color_temperature;
+        if (dali_color_temperature != this->last_temperature_) {
+            this->last_temperature_ = dali_color_temperature;
 
             ESP_LOGD(TAG, "DALI[%d] Tc=%d", address_, dali_color_temperature);
 

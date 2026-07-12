@@ -83,6 +83,8 @@ class DaliLight : public light::LightOutput, public Component {
 
     bool tc_supported_;
 
+    uint16_t last_temperature_{0};
+
     // Cached initial state from DALI device queries, used by the static
     // trampoline passed to set_initial_state() (ESPHome 2026.4+ callback API).
     float initial_brightness_{1.0f};

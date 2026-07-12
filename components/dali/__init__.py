@@ -6,11 +6,14 @@ from esphome.core import CORE
 import esphome.codegen as cg
 import esphome.config_validation as cv
 
-AUTO_LOAD = ["light", "output"]
+from . import binary_sensor as dali_binary_sensor
+
+AUTO_LOAD = ["light", "output", "binary_sensor"]
 
 CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
+CONF_DEBUG_TX_RX = 'debug_tx_rx'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
 DEFAULT_MAX_DISCOVERED_LIGHTS = 64
@@ -28,6 +31,8 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_MAX_DISCOVERED_LIGHTS, default=DEFAULT_MAX_DISCOVERED_LIGHTS): cv.int_range(
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
+    cv.Optional(CONF_DEBUG_TX_RX, default=False): cv.boolean,
+    cv.Optional(dali_binary_sensor.CONF_BUS_STATUS): dali_binary_sensor.bus_status_schema(dali_ns),
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config: OrderedDict):
@@ -39,6 +44,9 @@ async def to_code(config: OrderedDict):
     
     tx_pin = await cg.gpio_pin_expression(config[CONF_TX_PIN])
     cg.add(var.set_tx_pin(tx_pin))
+
+    if config.get(CONF_DEBUG_TX_RX, False):
+        cg.add(var.set_debug_tx_rx(True))
 
     if config.get(CONF_DISCOVERY, False):
         cg.add(var.do_device_discovery())
@@ -68,3 +76,6 @@ async def to_code(config: OrderedDict):
 
     if config.get(CONF_INITIALIZE_ADDRESSES, False):
         cg.add(var.do_initialize_addresses())
+
+    if dali_binary_sensor.CONF_BUS_STATUS in config:
+        await dali_binary_sensor.register_bus_status(var, config)

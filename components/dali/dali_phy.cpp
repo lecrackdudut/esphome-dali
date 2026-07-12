@@ -37,6 +37,38 @@ void DaliPhy::_init() {
 
 uint32_t DaliPhy::milli() { return static_cast<uint32_t>(esp_timer_get_time() / 1000LL); }
 
+const char *phy_result_name(uint8_t code) {
+  switch (code) {
+    case DALI_PHY_OK:
+      return "OK";
+    case DALI_PHY_RESULT_BUS_NOT_IDLE:
+      return "BUS_NOT_IDLE";
+    case DALI_PHY_RESULT_FRAME_TOO_LONG:
+      return "FRAME_TOO_LONG";
+    case DALI_PHY_RESULT_COLLISION:
+      return "COLLISION";
+    case DALI_PHY_RESULT_TRANSMITTING:
+      return "TRANSMITTING";
+    case DALI_PHY_RESULT_NO_REPLY:
+      return "NO_REPLY";
+    case DALI_PHY_RESULT_TIMEOUT:
+      return "TIMEOUT";
+    case DALI_PHY_RESULT_INVALID_REPLY:
+      return "INVALID_REPLY";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+PhySnapshot DaliPhy::get_snapshot() const {
+  PhySnapshot snap{};
+  snap.busstate = this->busstate;
+  snap.idlecnt = this->idlecnt;
+  snap.txcollision = this->txcollision;
+  snap.rx_gpio_level = this->bus_is_high != nullptr ? this->bus_is_high() : 0;
+  return snap;
+}
+
 void DaliPhy::timer() {
   uint8_t busishigh = (this->bus_is_high() ? 1 : 0);
 

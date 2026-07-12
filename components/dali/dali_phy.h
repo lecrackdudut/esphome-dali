@@ -30,6 +30,16 @@ namespace dali_phy {
 
 #define DALI_PHY_RX_BUF_SIZE 40
 
+/// Snapshot of PHY state for diagnostics (read from main thread only).
+struct PhySnapshot {
+  uint8_t busstate;
+  uint8_t idlecnt;
+  uint8_t txcollision;
+  uint8_t rx_gpio_level;
+};
+
+const char *phy_result_name(uint8_t code);
+
 /// Low-level DALI physical layer: 9600 Hz oversampled TX/RX with Manchester decode.
 /// Ported from qqqlab DALI_Lib (ESP32-S3-Pico-DALI reference).
 class DaliPhy {
@@ -47,6 +57,9 @@ class DaliPhy {
 
   /// Poll receiver after a forward frame; returns reply byte or 0 on timeout/NACK.
   uint8_t receive_backward(uint32_t timeout_ms = 100);
+
+  /// Read volatile PHY fields and current RX GPIO level (main thread only).
+  PhySnapshot get_snapshot() const;
 
   uint8_t txcollisionhandling{DALI_PHY_TX_COLLISION_AUTO};
 

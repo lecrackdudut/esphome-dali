@@ -369,10 +369,18 @@ DaliBusManager(DaliPort& port)
         port.sendSpecialCommand(DaliSpecialCommand::SEARCH_ADDRM, (search_address >> 8) & 0xFF);  // Set SEARCHM
         port.sendSpecialCommand(DaliSpecialCommand::SEARCH_ADDRL, search_address & 0xFF);         // Set SEARCHL
 
-        port.sendSpecialCommand(DaliSpecialCommand::COMPARE, 0);
-
         const unsigned long timeout_ms = 25;
-        return (port.receiveBackwardFrame(timeout_ms) == 0xFF);
+        uint8_t retry = 2;
+        while (retry > 0) {
+            port.sendSpecialCommand(DaliSpecialCommand::COMPARE, 0);
+            const uint8_t rv = port.receiveBackwardFrame(timeout_ms);
+            if (rv == 0xFF)
+                return true;
+            if (rv != 0)
+                return true;  // collision or unexpected reply — treat as match (Waveshare reference)
+            retry--;
+        }
+        return false;
     }
 
     /// @brief Exit the initialization mode.

@@ -7,9 +7,9 @@
 
 #if defined(USE_ESP32) && defined(ARDUINO)
 #include <esp32-hal-timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #endif
-
-static const bool DEBUG_LOG_RXTX = false;
 
 using namespace esphome;
 using namespace esphome::dali;
@@ -61,6 +61,147 @@ void ARDUINO_ISR_ATTR on_dali_timer() {
 
 }  // namespace
 
+void DaliBusComponent::ensure_bus_mutex() {
+#if defined(USE_ESP32) && defined(ARDUINO)
+    if (this->m_bus_mutex == nullptr) {
+        this->m_bus_mutex = xSemaphoreCreateRecursiveMutex();
+    }
+#endif
+}
+
+bool DaliBusComponent::lock_bus(uint32_t timeout_ms) {
+#if defined(USE_ESP32) && defined(ARDUINO)
+    this->ensure_bus_mutex();
+    if (this->m_bus_mutex == nullptr) {
+        return true;
+    }
+    return xSemaphoreTakeRecursive(static_cast<SemaphoreHandle_t>(this->m_bus_mutex), pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+#else
+    return true;
+#endif
+}
+
+void DaliBusComponent::unlock_bus() {
+#if defined(USE_ESP32) && defined(ARDUINO)
+    if (this->m_bus_mutex != nullptr) {
+        xSemaphoreGiveRecursive(static_cast<SemaphoreHandle_t>(this->m_bus_mutex));
+    }
+#endif
+}
+
+const char *DaliBusComponent::phy_busstate_name(uint8_t busstate) {
+    switch (busstate) {
+        case 0: return "IDLE";
+        case 1: return "RX";
+        case 3: return "TX";
+        case 4: return "COLLISION_TX";
+        default: return "UNKNOWN";
+    }
+}
+
+void DaliBusComponent::log_phy_snapshot(bool force) {
+    const uint32_t now = millis();
+    dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
+
+    if (!force) {
+        if (now - this->m_last_phy_log_ms < PHY_LOG_INTERVAL_MS &&
+            snap.busstate == this->m_last_logged_busstate) {
+            return;
+        }
+    }
+
+    this->m_last_phy_log_ms = now;
+    this->m_last_logged_busstate = snap.busstate;
+
+    DALI_LOGD("PHY state=%s idlecnt=%u rx=%u collisions=%u tx_errors=%u",
+              phy_busstate_name(snap.busstate),
+              snap.idlecnt,
+              snap.rx_gpio_level,
+              snap.txcollision,
+              this->m_tx_error_count);
+}
+
+bool DaliBusComponent::check_bus_health() {
+    if (!this->lock_bus()) {
+        DALI_LOGW("Bus health check skipped: could not acquire bus lock");
+        return false;
+    }
+
+    dali.bus_manager.terminate();
+    delay(10);
+    const bool present = dali.bus_manager.isControlGearPresent();
+    this->unlock_bus();
+
+    this->log_phy_snapshot(false);
+
+    if (present) {
+        this->m_consecutive_bus_failures = 0;
+    } else {
+        this->m_consecutive_bus_failures++;
+        DALI_LOGW("Bus health check failed (%u consecutive)", this->m_consecutive_bus_failures);
+        if (this->m_consecutive_bus_failures >= BUS_STATUS_FAILURE_THRESHOLD) {
+            this->attempt_bus_recovery();
+        }
+    }
+
+    this->update_bus_status_sensor(present);
+    return present;
+}
+
+void DaliBusComponent::attempt_bus_recovery() {
+    DALI_LOGW("Attempting DALI bus recovery (reset + terminate)");
+    if (!this->lock_bus()) {
+        DALI_LOGW("Bus recovery skipped: could not acquire bus lock");
+        return;
+    }
+
+    this->resetBus();
+    esp_task_wdt_reset();
+    dali.bus_manager.terminate();
+    delay(50);
+
+    const bool present = dali.bus_manager.isControlGearPresent();
+    this->unlock_bus();
+
+    this->log_phy_snapshot(true);
+
+    if (present) {
+        DALI_LOGI("Bus recovery succeeded");
+        this->m_consecutive_bus_failures = 0;
+    } else {
+        DALI_LOGE("Bus recovery failed");
+    }
+
+    this->update_bus_status_sensor(present);
+}
+
+void DaliBusComponent::update_bus_status_sensor(bool bus_ok) {
+    if (this->m_bus_status_sensor != nullptr) {
+        this->m_bus_status_sensor->publish_state(bus_ok);
+    }
+}
+
+void DaliBusStatusBinarySensor::setup() {
+    if (this->parent_ == nullptr) {
+        return;
+    }
+    this->last_update_ms_ = millis();
+    this->parent_->check_bus_health();
+}
+
+void DaliBusStatusBinarySensor::loop() {
+    if (this->parent_ == nullptr) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (now - this->last_update_ms_ < this->update_interval_ms_) {
+        return;
+    }
+    this->last_update_ms_ = now;
+    this->parent_->check_bus_health();
+}
+
 void DaliBusComponent::init_phy() {
     s_rx_gpio = pin_to_gpio(this->m_rxPin);
     s_tx_gpio = pin_to_gpio(this->m_txPin);
@@ -99,16 +240,17 @@ void DaliBusComponent::stop_phy_timer() {
 }
 
 void DaliBusComponent::setup() {
+    this->ensure_bus_mutex();
     this->init_phy();
     this->start_phy_timer();
     DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
 
-    if (m_discovery) {
-        if (false) {
-            this->resetBus();
-            esp_task_wdt_reset();
-        }
+    this->resetBus();
+    esp_task_wdt_reset();
+    dali.bus_manager.terminate();
+    delay(50);
 
+    if (m_discovery) {
         if (dali.bus_manager.isControlGearPresent()) {
             DALI_LOGD("Detected control gear on bus");
         } else {
@@ -286,6 +428,8 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 }
 
 void DaliBusComponent::loop() {
+    this->log_phy_snapshot(false);
+
     for (auto* light : m_dynamic_lights) {
         light->loop();
     }
@@ -310,6 +454,11 @@ void DaliBusComponent::dump_config() {
         ESP_LOGCONFIG(TAG, "  Devices found: %u", m_discovery_devices_found);
         ESP_LOGCONFIG(TAG, "  Lights created: %u", m_discovery_lights_created);
     }
+    ESP_LOGCONFIG(TAG, "  Debug TX/RX: %s", m_debug_tx_rx ? "enabled" : "disabled");
+    ESP_LOGCONFIG(TAG, "  TX errors: %u", m_tx_error_count);
+    dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
+    ESP_LOGCONFIG(TAG, "  PHY state: %s, idlecnt=%u, rx=%u",
+                  phy_busstate_name(snap.busstate), snap.idlecnt, snap.rx_gpio_level);
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
@@ -338,20 +487,38 @@ void DaliBusComponent::resetBus() {
 }
 
 void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
-    if (DEBUG_LOG_RXTX) {
+    if (!this->lock_bus()) {
+        this->m_tx_error_count++;
+        DALI_LOGW("TX dropped (lock timeout): %02x %02x", address, data);
+        return;
+    }
+
+    if (this->m_debug_tx_rx) {
         DALI_LOGD("TX: %02x %02x", address, data);
     }
 
     uint8_t frame[2] = { address, data };
-    this->m_phy.tx_wait(frame, 16, 500);
+    const uint8_t result = this->m_phy.tx_wait(frame, 16, 500);
+    if (result != DALI_PHY_OK) {
+        this->m_tx_error_count++;
+        DALI_LOGW("TX failed (%s): %02x %02x", dali_phy::phy_result_name(result), address, data);
+    }
+
+    this->unlock_bus();
 }
 
 uint8_t DaliBusComponent::receiveBackwardFrame(unsigned long timeout_ms) {
-    uint8_t data = this->m_phy.receive_backward(timeout_ms);
+    if (!this->lock_bus()) {
+        DALI_LOGW("RX skipped (lock timeout)");
+        return 0;
+    }
 
-    if (DEBUG_LOG_RXTX) {
+    const uint8_t data = this->m_phy.receive_backward(timeout_ms);
+
+    if (this->m_debug_tx_rx) {
         DALI_LOGD("RX: %02x", data);
     }
 
+    this->unlock_bus();
     return data;
 }

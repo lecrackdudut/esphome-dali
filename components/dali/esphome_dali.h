@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 #include "esphome/components/light/light_state.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include <vector>
 #include "dali.h"
 #include "dali_phy.h"
@@ -16,8 +17,29 @@ enum class DaliInitMode {
     InitializeAll
 };
 
+class DaliBusComponent;
+
+/// Periodic health check exposed as a Home Assistant binary sensor.
+class DaliBusStatusBinarySensor : public binary_sensor::BinarySensor, public Component {
+public:
+    void set_parent(DaliBusComponent *parent) { parent_ = parent; }
+    void set_update_interval(uint32_t interval_ms) { update_interval_ms_ = interval_ms; }
+
+    float get_setup_priority() const override { return setup_priority::DATA; }
+    void setup() override;
+    void loop() override;
+
+private:
+    DaliBusComponent *parent_{nullptr};
+    uint32_t update_interval_ms_{30000};
+    uint32_t last_update_ms_{0};
+};
+
 class DaliBusComponent : public esphome::Component, public ::DaliPort {
 public:
+    static constexpr uint8_t BUS_STATUS_FAILURE_THRESHOLD = 3;
+    static constexpr uint32_t PHY_LOG_INTERVAL_MS = 60000;
+
     DaliBusComponent()
         : esphome::Component { }
         , dali { *this }
@@ -30,6 +52,8 @@ public:
 
     void set_tx_pin(esphome::GPIOPin* tx_pin) { m_txPin = tx_pin; }
     void set_rx_pin(esphome::GPIOPin* rx_pin) { m_rxPin = rx_pin; }
+    void set_debug_tx_rx(bool enabled) { m_debug_tx_rx = enabled; }
+    void set_bus_status_sensor(DaliBusStatusBinarySensor *sensor) { m_bus_status_sensor = sensor; }
 
     /// @brief Perform automatic device discovery on setup.
     /// Light components will automatically be created and appear in HomeAssistant
@@ -62,7 +86,13 @@ public:
         return short_addr <= ADDR_SHORT_MAX && m_addresses[short_addr] == 0xFFFFFF;
     }
 
+    bool check_bus_health();
+    void attempt_bus_recovery();
+    void log_phy_snapshot(bool force = false);
+
     DaliMaster dali;
+
+    uint32_t get_tx_error_count() const { return m_tx_error_count; }
 
 public: // DaliPort
     void resetBus() override;
@@ -74,20 +104,33 @@ private:
     void start_phy_timer();
     void stop_phy_timer();
     void create_light_component(short_addr_t short_addr, uint32_t long_addr);
+    void ensure_bus_mutex();
+    bool lock_bus(uint32_t timeout_ms = 600);
+    void unlock_bus();
+    void update_bus_status_sensor(bool bus_ok);
+    static const char *phy_busstate_name(uint8_t busstate);
 
     dali_phy::DaliPhy m_phy;
     void* m_timer{nullptr};
+    void* m_bus_mutex{nullptr};
 
     esphome::GPIOPin* m_rxPin{nullptr};
     esphome::GPIOPin* m_txPin{nullptr};
+    DaliBusStatusBinarySensor *m_bus_status_sensor{nullptr};
 
     bool m_discovery = false;
+    bool m_debug_tx_rx = false;
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 
     uint8_t m_discovery_devices_found{0};
     uint8_t m_discovery_lights_created{0};
     bool m_discovery_compare_ok{false};
+
+    uint32_t m_tx_error_count{0};
+    uint8_t m_consecutive_bus_failures{0};
+    uint32_t m_last_phy_log_ms{0};
+    uint8_t m_last_logged_busstate{0xFF};
 
     // Dynamic lights created during discovery are not in ESPHome's looping_components_
     // (that list is fixed at compile time). We drive their loop() manually.
