@@ -103,6 +103,12 @@ void DaliBusComponent::setup() {
     this->start_phy_timer();
     DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
 
+    if (this->m_terminate_on_boot) {
+        DALI_LOGI("Sending TERMINATE to exit initialization mode...");
+        dali.bus_manager.terminate();
+        delay(50);
+    }
+
     if (m_discovery) {
         if (false) {
             this->resetBus();
@@ -310,6 +316,7 @@ void DaliBusComponent::dump_config() {
     LOG_PIN("  RX Pin: ", m_rxPin);
     ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz), driver v2");
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
+    ESP_LOGCONFIG(TAG, "  Terminate on boot: %s", m_terminate_on_boot ? "yes" : "no");
     if (m_discovery) {
         const char *init_mode = "discover only";
         if (m_initialize_addresses == DaliInitMode::InitializeAll) {

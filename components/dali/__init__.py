@@ -10,6 +10,7 @@ AUTO_LOAD = ["light", "output"]
 
 CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
+CONF_TERMINATE_ON_BOOT = 'terminate_on_boot'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
@@ -25,6 +26,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required(CONF_TX_PIN): pins.gpio_output_pin_schema,
     cv.Optional(CONF_DISCOVERY): cv.All(cv.requires_component("light"), cv.boolean),
     cv.Optional(CONF_INITIALIZE_ADDRESSES): cv.boolean,
+    cv.Optional(CONF_TERMINATE_ON_BOOT, default=False): cv.boolean,
     cv.Optional(CONF_MAX_DISCOVERED_LIGHTS, default=DEFAULT_MAX_DISCOVERED_LIGHTS): cv.int_range(
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
@@ -68,3 +70,6 @@ async def to_code(config: OrderedDict):
 
     if config.get(CONF_INITIALIZE_ADDRESSES, False):
         cg.add(var.do_initialize_addresses())
+
+    if config.get(CONF_TERMINATE_ON_BOOT, False):
+        cg.add(var.set_terminate_on_boot(True))

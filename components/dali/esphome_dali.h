@@ -42,6 +42,9 @@ public:
     /// @note
     void do_initialize_addresses(DaliInitMode mode = DaliInitMode::InitializeUnassigned) { m_initialize_addresses = mode; }
 
+    /// @brief Send TERMINATE at boot to exit INITIALISE mode on control gear (e.g. after interrupted discovery).
+    void set_terminate_on_boot(bool terminate_on_boot) { m_terminate_on_boot = terminate_on_boot; }
+
     // NOTE: Must have a higher priority number than the components that depend on this.
     // ie, this must be initialized first.
     float get_setup_priority() const override { return esphome::setup_priority::HARDWARE; }
@@ -91,6 +94,7 @@ private:
     esphome::GPIOPin* m_txPin{nullptr};
 
     bool m_discovery = false;
+    bool m_terminate_on_boot = false;
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 
