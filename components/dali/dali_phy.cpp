@@ -555,20 +555,14 @@ bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_
   esp_err_t tx_err =
       rmt_transmit(this->tx_channel_, this->tx_encoder_, symbols, symbol_count * sizeof(rmt_symbol_word_t), &tx_cfg);
   if (tx_err == ESP_OK) {
-    const uint32_t deadline_ms = this->milli_() + 200;
-    while (this->milli_() < deadline_ms) {
+    // Forward frame ~16 ms; poll RX GPIO during transmission without spamming rmt_tx_wait_all_done(0).
+    for (int i = 0; i < 20; i++) {
       if (this->read_rx_level_() == 0) {
         this->last_tx_bus_active_ = 1;
       }
-      tx_err = rmt_tx_wait_all_done(this->tx_channel_, 0);
-      if (tx_err == ESP_OK) {
-        break;
-      }
       vTaskDelay(pdMS_TO_TICKS(1));
     }
-    if (tx_err != ESP_OK) {
-      tx_err = ESP_ERR_TIMEOUT;
-    }
+    tx_err = rmt_tx_wait_all_done(this->tx_channel_, 100);
   }
 
   if (tx_err != ESP_OK) {
