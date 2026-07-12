@@ -106,12 +106,13 @@ void DaliBusComponent::log_phy_snapshot(bool force) {
 const char *DaliBusComponent::build_diag_string(char *buf, size_t buflen) const {
     dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
     snprintf(buf, buflen,
-             "phy=rmt state=%s idle=%ums rx=%u tx=%u tx_act=%u rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
+             "phy=rmt state=%s idle=%ums rx=%u tx=%u tx_act=%u err=%d rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
              phy_busstate_name(snap.busstate),
              snap.idle_ms,
              snap.rx_gpio_level,
              snap.tx_count,
              snap.last_tx_bus_active,
+             snap.last_tx_err,
              dali_phy::backward_result_name(snap.last_backward_type),
              snap.last_backward_data,
              this->m_consecutive_bus_failures,
@@ -277,7 +278,10 @@ void DaliBusComponent::init_phy() {
     if (!this->m_phy.begin(static_cast<int>(tx_gpio), static_cast<int>(s_rx_gpio), this->m_invert_tx, this->m_invert_rx,
                            phy_bus_is_high)) {
         ESP_LOGE("dali", "Failed to initialize RMT DALI PHY");
+        return;
     }
+    DALI_LOGI("RMT PHY initialized on TX=%d RX=%d invert_tx=%d (copy-encoder)", static_cast<int>(tx_gpio),
+              static_cast<int>(s_rx_gpio), this->m_invert_tx);
 }
 
 void DaliBusComponent::shutdown_phy() {
@@ -531,6 +535,12 @@ void DaliBusComponent::resetBus() {
 }
 
 void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
+    if (!this->m_phy.is_ready()) {
+        this->m_tx_error_count++;
+        DALI_LOGW("TX dropped (PHY not ready): %02x %02x", address, data);
+        return;
+    }
+
     if (!this->lock_bus()) {
         this->m_tx_error_count++;
         DALI_LOGW("TX dropped (lock timeout): %02x %02x", address, data);
@@ -545,7 +555,9 @@ void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
     const uint8_t result = this->m_phy.tx_wait(frame, 16, 500);
     if (result != DALI_PHY_OK) {
         this->m_tx_error_count++;
-        DALI_LOGW("TX failed (%s): %02x %02x", dali_phy::phy_result_name(result), address, data);
+        const dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
+        DALI_LOGW("TX failed (%s, rmt_err=%d): %02x %02x", dali_phy::phy_result_name(result), snap.last_tx_err, address,
+                  data);
     } else if (!this->m_phy.get_last_tx_bus_active()) {
         this->m_tx_silent_count++;
         DALI_LOGW("TX silent (no bus activity on RX): %02x %02x", address, data);

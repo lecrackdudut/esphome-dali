@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 
+#include "driver/rmt_encoder.h"
 #include "driver/rmt_rx.h"
 #include "driver/rmt_tx.h"
 #include "freertos/FreeRTOS.h"
@@ -55,6 +56,7 @@ struct PhySnapshot {
   uint8_t txcollision;
   uint8_t rx_gpio_level;
   uint32_t tx_count;
+  int32_t last_tx_err;
   uint8_t last_tx_bus_active;
   BackwardResultType last_backward_type;
   uint8_t last_backward_data;
@@ -93,6 +95,9 @@ class DaliPhy {
   /// Read PHY fields and current RX GPIO level (main thread only).
   PhySnapshot get_snapshot() const;
 
+  /// True if RMT channels were initialized successfully.
+  bool is_ready() const { return this->initialized_; }
+
   /// True if the last completed TX was observed modulating the bus (RX saw line low).
   uint8_t get_last_tx_bus_active() const { return this->last_tx_bus_active_; }
 
@@ -105,8 +110,10 @@ class DaliPhy {
   bool enable_channels_();
   bool arm_rx_();
   bool wait_ifg_(uint32_t timeout_ms);
+  size_t build_forward_symbols_(const uint8_t *data, uint8_t byte_count, rmt_symbol_word_t *out) const;
   bool transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms);
   bool poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_decode_error);
+  void recover_tx_channel_();
   void apply_ifg_();
   void set_tx_idle_level_() const;
   uint32_t milli_() const;
@@ -124,15 +131,15 @@ class DaliPhy {
   QueueHandle_t rx_queue_{nullptr};
   rmt_receive_config_t rx_cfg_{};
   rmt_symbol_word_t rx_raw_[32]{};
-  void *phy_ctx_{nullptr};
 
-  const rmt_symbol_word_t *symbol_one_{nullptr};
-  const rmt_symbol_word_t *symbol_zero_{nullptr};
-  const rmt_symbol_word_t *symbol_stop_{nullptr};
+  rmt_symbol_word_t symbol_one_{};
+  rmt_symbol_word_t symbol_zero_{};
+  rmt_symbol_word_t symbol_stop_{};
 
   ChannelState channel_state_{ChannelState::OFF};
   uint32_t last_ifg_end_ms_{0};
   uint32_t tx_count_{0};
+  int32_t last_tx_err_{0};
   uint8_t last_tx_bus_active_{0};
   BackwardResultType last_backward_type_{BACKWARD_TIMEOUT};
   uint8_t last_backward_data_{0};

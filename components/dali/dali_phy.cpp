@@ -16,6 +16,7 @@
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -36,12 +37,6 @@ static constexpr uint32_t DALI_DEFAULT_MEM_BLOCK = 64;
 
 static inline uint32_t us_to_rmt_ticks(uint32_t us) { return us * (DALI_RMT_RESOLUTION_HZ / 1000000U); }
 static inline uint32_t us_to_ns(uint32_t us) { return us * 1000U; }
-
-struct PhyContext {
-  const rmt_symbol_word_t *symbol_one;
-  const rmt_symbol_word_t *symbol_zero;
-  const rmt_symbol_word_t *symbol_stop;
-};
 
 static inline rmt_symbol_word_t make_rmt_symbol(uint16_t dur0, uint8_t lvl0, uint16_t dur1, uint8_t lvl1) {
   rmt_symbol_word_t sym{};
@@ -71,59 +66,6 @@ static rmt_symbol_word_t make_sym_zero_invert() {
 }
 static rmt_symbol_word_t make_sym_stop_invert() {
   return make_rmt_symbol(DALI_TE_TICKS * 2, 0, DALI_TE_TICKS * 2, 0);
-}
-
-static rmt_symbol_word_t s_sym_one_normal;
-static rmt_symbol_word_t s_sym_zero_normal;
-static rmt_symbol_word_t s_sym_stop_normal;
-static rmt_symbol_word_t s_sym_one_invert;
-static rmt_symbol_word_t s_sym_zero_invert;
-static rmt_symbol_word_t s_sym_stop_invert;
-static bool s_symbols_initialized = false;
-
-static void init_symbol_tables() {
-  if (s_symbols_initialized) {
-    return;
-  }
-  s_sym_one_normal = make_sym_one_normal();
-  s_sym_zero_normal = make_sym_zero_normal();
-  s_sym_stop_normal = make_sym_stop_normal();
-  s_sym_one_invert = make_sym_one_invert();
-  s_sym_zero_invert = make_sym_zero_invert();
-  s_sym_stop_invert = make_sym_stop_invert();
-  s_symbols_initialized = true;
-}
-
-static size_t dali_tx_encode_cb(const void *data, size_t data_size, size_t symbols_written, size_t symbols_free,
-                               rmt_symbol_word_t *symbols, bool *done, void *arg) {
-  auto *ctx = static_cast<PhyContext *>(arg);
-  if (symbols_written == 0) {
-    if (symbols_free < 1) {
-      return 0;
-    }
-    symbols[0] = *ctx->symbol_one;
-    return 1;
-  }
-
-  const auto *bytes = static_cast<const uint8_t *>(data);
-  const size_t byte_idx = (symbols_written - 1) / 8;
-  if (byte_idx < data_size) {
-    if (symbols_free < 8) {
-      return 0;
-    }
-    size_t out = 0;
-    for (int mask = 0x80; mask != 0; mask >>= 1) {
-      symbols[out++] = (bytes[byte_idx] & mask) ? *ctx->symbol_one : *ctx->symbol_zero;
-    }
-    return out;
-  }
-
-  if (symbols_free < 1) {
-    return 0;
-  }
-  symbols[0] = *ctx->symbol_stop;
-  *done = true;
-  return 1;
 }
 
 static bool IRAM_ATTR dali_rx_done_cb(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
@@ -260,28 +202,16 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
   this->invert_tx_ = invert_tx;
   this->invert_rx_ = invert_rx;
   this->bus_is_high_ = bus_is_high;
-  init_symbol_tables();
 
   if (invert_tx) {
-    this->symbol_one_ = &s_sym_one_invert;
-    this->symbol_zero_ = &s_sym_zero_invert;
-    this->symbol_stop_ = &s_sym_stop_invert;
+    this->symbol_one_ = make_sym_one_invert();
+    this->symbol_zero_ = make_sym_zero_invert();
+    this->symbol_stop_ = make_sym_stop_invert();
   } else {
-    this->symbol_one_ = &s_sym_one_normal;
-    this->symbol_zero_ = &s_sym_zero_normal;
-    this->symbol_stop_ = &s_sym_stop_normal;
+    this->symbol_one_ = make_sym_one_normal();
+    this->symbol_zero_ = make_sym_zero_normal();
+    this->symbol_stop_ = make_sym_stop_normal();
   }
-
-  auto *ctx = new PhyContext{
-      .symbol_one = this->symbol_one_,
-      .symbol_zero = this->symbol_zero_,
-      .symbol_stop = this->symbol_stop_,
-  };
-  if (ctx == nullptr) {
-    ESP_LOGE(TAG, "Out of memory allocating encoder context");
-    return false;
-  }
-  this->phy_ctx_ = ctx;
 
   gpio_set_direction(static_cast<gpio_num_t>(rx_gpio), GPIO_MODE_INPUT);
 
@@ -295,10 +225,9 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
     return false;
   }
 
-  this->set_tx_idle_level_();
-
   this->last_ifg_end_ms_ = 0;
   this->tx_count_ = 0;
+  this->last_tx_err_ = 0;
   this->last_tx_bus_active_ = 0;
   this->last_backward_type_ = BACKWARD_TIMEOUT;
   this->last_backward_data_ = 0;
@@ -311,12 +240,6 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
 
 void DaliPhy::end() {
   this->destroy_channels_();
-
-  if (this->phy_ctx_ != nullptr) {
-    delete static_cast<PhyContext *>(this->phy_ctx_);
-    this->phy_ctx_ = nullptr;
-  }
-
   this->initialized_ = false;
   this->channels_enabled_ = false;
   this->channel_state_ = ChannelState::OFF;
@@ -397,20 +320,16 @@ bool DaliPhy::ensure_channels_created_() {
   tx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
   tx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
   tx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
-  tx_channel_cfg.trans_queue_depth = 4;
+  tx_channel_cfg.trans_queue_depth = 1;
   if (rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create TX channel");
     this->destroy_channels_();
     return false;
   }
 
-  const rmt_simple_encoder_config_t enc_cfg = {
-      .callback = dali_tx_encode_cb,
-      .arg = this->phy_ctx_,
-      .min_chunk_size = 8,
-  };
-  if (rmt_new_simple_encoder(&enc_cfg, &this->tx_encoder_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create TX encoder");
+  const rmt_copy_encoder_config_t enc_cfg = {};
+  if (rmt_new_copy_encoder(&enc_cfg, &this->tx_encoder_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX copy encoder");
     this->destroy_channels_();
     return false;
   }
@@ -475,6 +394,8 @@ void DaliPhy::pulse_bus_reset() {
     return;
   }
 
+  ESP_LOGD(TAG, "Bus reset pulse start (1s active)");
+
   if (this->tx_channel_ != nullptr) {
     rmt_tx_wait_all_done(this->tx_channel_, 0);
   }
@@ -491,6 +412,28 @@ void DaliPhy::pulse_bus_reset() {
   if (!this->enable_channels_()) {
     ESP_LOGE(TAG, "Failed to re-enable RMT channels after bus reset pulse");
   }
+
+  ESP_LOGD(TAG, "Bus reset pulse done");
+}
+
+void DaliPhy::recover_tx_channel_() {
+  if (this->tx_channel_ == nullptr || this->tx_encoder_ == nullptr) {
+    return;
+  }
+
+  rmt_tx_wait_all_done(this->tx_channel_, 0);
+  if (this->channels_enabled_) {
+    const esp_err_t dis = rmt_disable(this->tx_channel_);
+    if (dis == ESP_OK) {
+      const esp_err_t en = rmt_enable(this->tx_channel_);
+      if (en != ESP_OK) {
+        ESP_LOGW(TAG, "TX channel re-enable failed: %s", esp_err_to_name(en));
+      }
+    } else {
+      ESP_LOGW(TAG, "TX channel disable failed: %s", esp_err_to_name(dis));
+    }
+  }
+  rmt_encoder_reset(this->tx_encoder_);
 }
 
 bool DaliPhy::arm_rx_() {
@@ -533,24 +476,37 @@ uint8_t DaliPhy::read_rx_level_() const {
   return 0;
 }
 
+size_t DaliPhy::build_forward_symbols_(const uint8_t *data, uint8_t byte_count, rmt_symbol_word_t *out) const {
+  size_t idx = 0;
+  out[idx++] = this->symbol_one_;
+  for (uint8_t b = 0; b < byte_count; b++) {
+    for (int mask = 0x80; mask != 0; mask >>= 1) {
+      out[idx++] = (data[b] & mask) ? this->symbol_one_ : this->symbol_zero_;
+    }
+  }
+  out[idx++] = this->symbol_stop_;
+  return idx;
+}
+
 bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
   if (!this->initialized_) {
+    this->last_tx_err_ = ESP_ERR_INVALID_STATE;
     return false;
   }
   if (bitlen > 32) {
+    this->last_tx_err_ = ESP_ERR_INVALID_ARG;
     return false;
   }
 
   if (!this->channels_enabled_ && !this->enable_channels_()) {
+    this->last_tx_err_ = ESP_ERR_INVALID_STATE;
     ESP_LOGE(TAG, "TX aborted: RMT channels not enabled");
     return false;
   }
 
   const uint8_t byte_count = static_cast<uint8_t>((bitlen + 7U) / 8U);
-
-  if (!this->arm_rx_()) {
-    return false;
-  }
+  rmt_symbol_word_t symbols[20];
+  const size_t symbol_count = this->build_forward_symbols_(data, byte_count, symbols);
 
   this->channel_state_ = ChannelState::TX;
   const rmt_transmit_config_t tx_cfg = {
@@ -560,32 +516,31 @@ bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_
               .eot_level = this->invert_tx_ ? 0U : 1U,
           },
   };
-  esp_err_t tx_err = rmt_transmit(this->tx_channel_, this->tx_encoder_, data, byte_count, &tx_cfg);
+
+  rmt_encoder_reset(this->tx_encoder_);
+  esp_err_t tx_err =
+      rmt_transmit(this->tx_channel_, this->tx_encoder_, symbols, symbol_count * sizeof(rmt_symbol_word_t), &tx_cfg);
   if (tx_err == ESP_OK) {
-    tx_err = rmt_tx_wait_all_done(this->tx_channel_, timeout_ms);
+    tx_err = rmt_tx_wait_all_done(this->tx_channel_, 200);
   }
 
   if (tx_err != ESP_OK) {
-    ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(tx_err));
-    rmt_tx_wait_all_done(this->tx_channel_, 0);
+    this->last_tx_err_ = tx_err;
+    ESP_LOGE(TAG, "TX failed: %s (symbols=%u)", esp_err_to_name(tx_err), static_cast<unsigned>(symbol_count));
+    this->recover_tx_channel_();
     this->channel_state_ = ChannelState::OFF;
     return false;
   }
 
+  this->last_tx_err_ = 0;
   this->tx_count_++;
+  this->last_tx_bus_active_ = this->read_rx_level_() == 0 ? 1U : 0U;
 
-  bool bus_active = this->read_rx_level_() == 0;
-  rmt_rx_done_event_data_t rx_data;
-  if (xQueueReceive(this->rx_queue_, &rx_data, 0) == pdTRUE) {
-    bus_active = bus_active || rx_data.num_symbols > 0;
-    if (!this->arm_rx_()) {
-      this->channel_state_ = ChannelState::OFF;
-      return false;
-    }
+  if (!this->arm_rx_()) {
+    this->channel_state_ = ChannelState::OFF;
+    return false;
   }
 
-  this->last_tx_bus_active_ = bus_active ? 1U : 0U;
-  this->channel_state_ = ChannelState::ARMED;
   return true;
 }
 
@@ -711,6 +666,7 @@ PhySnapshot DaliPhy::get_snapshot() const {
   snap.txcollision = 0;
   snap.rx_gpio_level = this->read_rx_level_();
   snap.tx_count = this->tx_count_;
+  snap.last_tx_err = this->last_tx_err_;
   snap.last_tx_bus_active = this->last_tx_bus_active_;
   snap.last_backward_type = this->last_backward_type_;
   snap.last_backward_data = this->last_backward_data_;
