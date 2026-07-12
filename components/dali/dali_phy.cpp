@@ -34,6 +34,8 @@ static constexpr uint32_t DALI_TE_US = 416U;
 static constexpr uint32_t DALI_IFG_MS = 20;
 static constexpr uint32_t DALI_BF_TIMEOUT_MS = 25;
 static constexpr uint32_t DALI_DEFAULT_MEM_BLOCK = 48;
+// Max valid pulse/idle before RMT ends RX. Must exceed the pre-backward idle gap (~9.2 ms = 22 Te).
+static constexpr uint32_t DALI_RX_MAX_PULSE_US = 15000;
 
 static inline uint32_t us_to_rmt_ticks(uint32_t us) { return us * (DALI_RMT_RESOLUTION_HZ / 1000000U); }
 static inline uint32_t us_to_ns(uint32_t us) { return us * 1000U; }
@@ -338,7 +340,7 @@ bool DaliPhy::ensure_channels_created_() {
   }
 
   this->rx_cfg_.signal_range_min_ns = us_to_ns(2);
-  this->rx_cfg_.signal_range_max_ns = us_to_ns(2000);
+  this->rx_cfg_.signal_range_max_ns = us_to_ns(DALI_RX_MAX_PULSE_US);
 
   return true;
 }
@@ -442,14 +444,39 @@ void DaliPhy::recover_tx_channel_() {
   rmt_encoder_reset(this->tx_encoder_);
 }
 
+bool DaliPhy::prepare_rx_channel_() {
+  if (this->rx_channel_ == nullptr) {
+    return false;
+  }
+
+  esp_err_t err = rmt_disable(this->rx_channel_);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "RX disable before receive: %s", esp_err_to_name(err));
+  }
+
+  err = rmt_enable(this->rx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "RX enable before receive: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  return true;
+}
+
 bool DaliPhy::arm_rx_() {
   if (!this->initialized_ || this->rx_channel_ == nullptr) {
     return false;
   }
 
+  if (!this->prepare_rx_channel_()) {
+    return false;
+  }
+
   xQueueReset(this->rx_queue_);
-  if (rmt_receive(this->rx_channel_, this->rx_raw_, sizeof(this->rx_raw_), &this->rx_cfg_) != ESP_OK) {
-    ESP_LOGE(TAG, "rmt_receive failed");
+  const esp_err_t err = rmt_receive(this->rx_channel_, this->rx_raw_, sizeof(this->rx_raw_), &this->rx_cfg_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "rmt_receive failed: %s", esp_err_to_name(err));
+    this->last_tx_err_ = err;
     return false;
   }
   this->channel_state_ = ChannelState::ARMED;
@@ -583,6 +610,10 @@ bool DaliPhy::poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_deco
       *out_decode_error = true;
     }
 
+    if (!this->prepare_rx_channel_()) {
+      ESP_LOGE(TAG, "RX re-arm prepare failed");
+      return false;
+    }
     if (rmt_receive(this->rx_channel_, this->rx_raw_, sizeof(this->rx_raw_), &this->rx_cfg_) != ESP_OK) {
       ESP_LOGE(TAG, "rmt_receive re-arm failed");
       return false;

@@ -108,6 +108,7 @@ class DaliPhy {
   void destroy_channels_();
   void disable_channels_();
   bool enable_channels_();
+  bool prepare_rx_channel_();
   bool arm_rx_();
   bool wait_ifg_(uint32_t timeout_ms);
   size_t build_forward_symbols_(const uint8_t *data, uint8_t byte_count, rmt_symbol_word_t *out) const;
