@@ -33,7 +33,7 @@ static constexpr uint32_t DALI_RMT_RESOLUTION_HZ = 1000000U;
 static constexpr uint32_t DALI_TE_US = 416U;
 static constexpr uint32_t DALI_IFG_MS = 20;
 static constexpr uint32_t DALI_BF_TIMEOUT_MS = 25;
-static constexpr uint32_t DALI_DEFAULT_MEM_BLOCK = 64;
+static constexpr uint32_t DALI_DEFAULT_MEM_BLOCK = 48;
 
 static inline uint32_t us_to_rmt_ticks(uint32_t us) { return us * (DALI_RMT_RESOLUTION_HZ / 1000000U); }
 static inline uint32_t us_to_ns(uint32_t us) { return us * 1000U; }
@@ -297,8 +297,9 @@ bool DaliPhy::ensure_channels_created_() {
   rx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
   rx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
   rx_channel_cfg.flags.invert_in = this->invert_rx_ ? 1U : 0U;
-  if (rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create RX channel");
+  esp_err_t err = rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create RX channel on GPIO %d: %s", this->rx_gpio_, esp_err_to_name(err));
     this->destroy_channels_();
     return false;
   }
@@ -306,8 +307,9 @@ bool DaliPhy::ensure_channels_created_() {
   rmt_rx_event_callbacks_t rx_cbs = {
       .on_recv_done = dali_rx_done_cb,
   };
-  if (rmt_rx_register_event_callbacks(this->rx_channel_, &rx_cbs, this->rx_queue_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to register RX callbacks");
+  err = rmt_rx_register_event_callbacks(this->rx_channel_, &rx_cbs, this->rx_queue_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to register RX callbacks: %s", esp_err_to_name(err));
     this->destroy_channels_();
     return false;
   }
@@ -321,15 +323,17 @@ bool DaliPhy::ensure_channels_created_() {
   tx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
   tx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
   tx_channel_cfg.trans_queue_depth = 1;
-  if (rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create TX channel");
+  err = rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX channel on GPIO %d: %s", this->tx_gpio_, esp_err_to_name(err));
     this->destroy_channels_();
     return false;
   }
 
   const rmt_copy_encoder_config_t enc_cfg = {};
-  if (rmt_new_copy_encoder(&enc_cfg, &this->tx_encoder_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create TX copy encoder");
+  err = rmt_new_copy_encoder(&enc_cfg, &this->tx_encoder_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX copy encoder: %s", esp_err_to_name(err));
     this->destroy_channels_();
     return false;
   }

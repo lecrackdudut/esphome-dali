@@ -106,7 +106,8 @@ void DaliBusComponent::log_phy_snapshot(bool force) {
 const char *DaliBusComponent::build_diag_string(char *buf, size_t buflen) const {
     dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
     snprintf(buf, buflen,
-             "phy=rmt state=%s idle=%ums rx=%u tx=%u tx_act=%u err=%d rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
+             "phy=rmt ready=%u state=%s idle=%ums rx=%u tx=%u tx_act=%u err=%d rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
+             this->m_phy.is_ready() ? 1U : 0U,
              phy_busstate_name(snap.busstate),
              snap.idle_ms,
              snap.rx_gpio_level,
@@ -170,6 +171,11 @@ void DaliBusComponent::attempt_bus_recovery() {
     if (!this->lock_bus()) {
         DALI_LOGW("Bus recovery skipped: could not acquire bus lock");
         return;
+    }
+
+    if (!this->m_phy.is_ready()) {
+        DALI_LOGW("PHY not ready, re-initializing RMT");
+        this->init_phy();
     }
 
     this->resetBus();
@@ -277,7 +283,8 @@ void DaliBusComponent::init_phy() {
 
     if (!this->m_phy.begin(static_cast<int>(tx_gpio), static_cast<int>(s_rx_gpio), this->m_invert_tx, this->m_invert_rx,
                            phy_bus_is_high)) {
-        ESP_LOGE("dali", "Failed to initialize RMT DALI PHY");
+        DALI_LOGE("Failed to initialize RMT DALI PHY (TX=%d RX=%d) — see dali.phy boot logs", static_cast<int>(tx_gpio),
+                  static_cast<int>(s_rx_gpio));
         return;
     }
     DALI_LOGI("RMT PHY initialized on TX=%d RX=%d invert_tx=%d (copy-encoder)", static_cast<int>(tx_gpio),
