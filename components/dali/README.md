@@ -13,7 +13,7 @@ dali:
   id: dali_bus
   tx_pin: 32
   rx_pin: 33
-  invert_tx: true   # required for Waveshare Pico-DALI opto interface (default: true)
+  invert_tx: false   # Waveshare Pico-DALI: GPIO LOW asserts bus (default). Use true only if GPIO HIGH asserts.
   invert_rx: false
   boot_delay: 30s
   discovery: true
@@ -25,7 +25,7 @@ dali:
     update_interval: 10s
 ```
 
-- **`invert_tx`**: Set to `true` when using an inverting opto driver (Waveshare Pico-DALI2). GPIO high asserts the bus (pulls line low).
+- **`invert_tx`**: Default `false` matches Waveshare Pico-DALI (`GPIO LOW` = assert bus, `GPIO HIGH` = idle). Set `true` only if your opto driver asserts the bus when the GPIO is high.
 - **`invert_rx`**: Set to `true` if the RX opto inverts the sensed bus level.
 - **RMT channels**: DALI needs one TX and one RX RMT channel. On ESP32-S3 only four TX slots exist; disable other RMT users (`esp32_rmt_led_strip`, `remote_transmitter`, `remote_receiver`, `neopixelbus`) or they may cause `no free tx channels` at boot.
 

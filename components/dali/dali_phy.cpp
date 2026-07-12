@@ -393,7 +393,7 @@ void DaliPhy::set_tx_idle_level_() const {
   if (this->tx_gpio_ < 0) {
     return;
   }
-  // Inverted opto: GPIO low releases the bus; non-inverted: GPIO high is idle.
+  // invert_tx=false (Waveshare Pico-DALI): GPIO HIGH = bus idle. invert_tx=true: GPIO LOW = bus idle.
   gpio_set_level(static_cast<gpio_num_t>(this->tx_gpio_), this->invert_tx_ ? 0 : 1);
 }
 
@@ -551,10 +551,24 @@ bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_
   };
 
   rmt_encoder_reset(this->tx_encoder_);
+  this->last_tx_bus_active_ = 0;
   esp_err_t tx_err =
       rmt_transmit(this->tx_channel_, this->tx_encoder_, symbols, symbol_count * sizeof(rmt_symbol_word_t), &tx_cfg);
   if (tx_err == ESP_OK) {
-    tx_err = rmt_tx_wait_all_done(this->tx_channel_, 200);
+    const uint32_t deadline_ms = this->milli_() + 200;
+    while (this->milli_() < deadline_ms) {
+      if (this->read_rx_level_() == 0) {
+        this->last_tx_bus_active_ = 1;
+      }
+      tx_err = rmt_tx_wait_all_done(this->tx_channel_, 0);
+      if (tx_err == ESP_OK) {
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (tx_err != ESP_OK) {
+      tx_err = ESP_ERR_TIMEOUT;
+    }
   }
 
   if (tx_err != ESP_OK) {
@@ -567,7 +581,6 @@ bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_
 
   this->last_tx_err_ = 0;
   this->tx_count_++;
-  this->last_tx_bus_active_ = this->read_rx_level_() == 0 ? 1U : 0U;
 
   if (!this->arm_rx_()) {
     this->channel_state_ = ChannelState::OFF;

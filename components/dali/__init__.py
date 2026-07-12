@@ -32,7 +32,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(DaliBusComponent),
     cv.Required(CONF_RX_PIN): pins.gpio_input_pin_schema,
     cv.Required(CONF_TX_PIN): pins.gpio_output_pin_schema,
-    cv.Optional(CONF_INVERT_TX, default=True): cv.boolean,
+    cv.Optional(CONF_INVERT_TX, default=False): cv.boolean,
     cv.Optional(CONF_INVERT_RX, default=False): cv.boolean,
     cv.Optional(CONF_DISCOVERY): cv.All(cv.requires_component("light"), cv.boolean),
     cv.Optional(CONF_INITIALIZE_ADDRESSES): cv.boolean,
