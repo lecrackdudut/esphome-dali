@@ -6,6 +6,8 @@ from esphome.core import CORE
 import esphome.codegen as cg
 import esphome.config_validation as cv
 
+from esphome.components.esp32 import include_builtin_idf_component
+
 from . import binary_sensor as dali_binary_sensor
 from . import text_sensor as dali_text_sensor
 
@@ -16,6 +18,8 @@ CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
 CONF_DEBUG_TX_RX = 'debug_tx_rx'
 CONF_BOOT_DELAY = 'boot_delay'
+CONF_INVERT_TX = 'invert_tx'
+CONF_INVERT_RX = 'invert_rx'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
 DEFAULT_MAX_DISCOVERED_LIGHTS = 64
@@ -28,6 +32,8 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(DaliBusComponent),
     cv.Required(CONF_RX_PIN): pins.gpio_input_pin_schema,
     cv.Required(CONF_TX_PIN): pins.gpio_output_pin_schema,
+    cv.Optional(CONF_INVERT_TX, default=True): cv.boolean,
+    cv.Optional(CONF_INVERT_RX, default=False): cv.boolean,
     cv.Optional(CONF_DISCOVERY): cv.All(cv.requires_component("light"), cv.boolean),
     cv.Optional(CONF_INITIALIZE_ADDRESSES): cv.boolean,
     cv.Optional(CONF_MAX_DISCOVERED_LIGHTS, default=DEFAULT_MAX_DISCOVERED_LIGHTS): cv.int_range(
@@ -40,6 +46,9 @@ CONFIG_SCHEMA = cv.Schema({
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config: OrderedDict):
+    if CORE.is_esp32:
+        include_builtin_idf_component("esp_driver_rmt")
+
     var = cg.new_Pvariable(config[CONF_ID])
     bus = await cg.register_component(var, config)
 
@@ -48,6 +57,9 @@ async def to_code(config: OrderedDict):
     
     tx_pin = await cg.gpio_pin_expression(config[CONF_TX_PIN])
     cg.add(var.set_tx_pin(tx_pin))
+
+    cg.add(var.set_invert_tx(config[CONF_INVERT_TX]))
+    cg.add(var.set_invert_rx(config[CONF_INVERT_RX]))
 
     if config.get(CONF_DEBUG_TX_RX, False):
         cg.add(var.set_debug_tx_rx(True))

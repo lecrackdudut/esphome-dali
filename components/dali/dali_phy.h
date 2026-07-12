@@ -2,6 +2,9 @@
         copyright qqqlab.com / github.com/qqqlab
         Adapted for ESPHome DALI component
 
+        RMT physical layer based on Espressif esp-iot-solution DALI driver
+        (Apache-2.0). Replaces the previous 9600 Hz timer ISR implementation.
+
         This program is free software: you can redistribute it and/or modify
         it under the terms of the GNU General Public License as published by
         the Free Software Foundation, either version 3 of the License, or
@@ -11,7 +14,10 @@
 
 #include <stdint.h>
 
-#include "esp_attr.h"
+#include "driver/rmt_rx.h"
+#include "driver/rmt_tx.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 namespace dali_phy {
 
@@ -24,11 +30,11 @@ namespace dali_phy {
 #define DALI_PHY_RESULT_NO_REPLY 101
 #define DALI_PHY_RESULT_INVALID_REPLY 105
 
-#define DALI_PHY_TX_COLLISION_AUTO 0
-#define DALI_PHY_TX_COLLISION_OFF 1
-#define DALI_PHY_TX_COLLISION_ON 2
-
-#define DALI_PHY_RX_BUF_SIZE 40
+enum PhyBusState : uint8_t {
+  PHY_BUSSTATE_IDLE = 0,
+  PHY_BUSSTATE_RX_ARMED = 1,
+  PHY_BUSSTATE_TX = 3,
+};
 
 /// Result of a backward-frame receive attempt.
 enum BackwardResultType : uint8_t {
@@ -45,10 +51,10 @@ struct BackwardResult {
 /// Snapshot of PHY state for diagnostics (read from main thread only).
 struct PhySnapshot {
   uint8_t busstate;
-  uint8_t idlecnt;
+  uint8_t idle_ms;
   uint8_t txcollision;
   uint8_t rx_gpio_level;
-  uint32_t isr_ticks;
+  uint32_t tx_count;
   uint8_t last_tx_bus_active;
   BackwardResultType last_backward_type;
   uint8_t last_backward_data;
@@ -57,19 +63,22 @@ struct PhySnapshot {
 const char *phy_result_name(uint8_t code);
 const char *backward_result_name(BackwardResultType type);
 
-/// Low-level DALI physical layer: 9600 Hz oversampled TX/RX with Manchester decode.
-/// Ported from qqqlab DALI_Lib (ESP32-S3-Pico-DALI reference).
+/// Low-level DALI physical layer using ESP32 RMT for Manchester TX/RX.
 class DaliPhy {
  public:
-  void begin(uint8_t (*bus_is_high)(), void (*bus_set_low)(), void (*bus_set_high)());
-  void IRAM_ATTR timer();
+  DaliPhy() = default;
+  ~DaliPhy();
 
-  uint8_t tx(uint8_t *data, uint8_t bitlen);
-  uint8_t rx(uint8_t *data);
-  uint8_t tx_state();
-  uint32_t milli();
+  DaliPhy(const DaliPhy &) = delete;
+  DaliPhy &operator=(const DaliPhy &) = delete;
 
-  /// Blocking transmit; waits for bus idle, retries on collision.
+  /// Initialize RMT TX/RX channels on the given GPIOs.
+  /// @param bus_is_high Optional RX level callback for diagnostics (may be nullptr).
+  bool begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, uint8_t (*bus_is_high)() = nullptr);
+
+  void end();
+
+  /// Blocking transmit; waits for inter-frame gap, then sends Manchester frame.
   uint8_t tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms = 500);
 
   /// Poll receiver after a forward frame; returns reply byte or 0 on timeout/NACK.
@@ -78,50 +87,50 @@ class DaliPhy {
   /// Poll receiver with explicit result classification.
   BackwardResult receive_backward_detailed(uint32_t timeout_ms = 100);
 
-  /// Read volatile PHY fields and current RX GPIO level (main thread only).
+  /// Read PHY fields and current RX GPIO level (main thread only).
   PhySnapshot get_snapshot() const;
 
   /// True if the last completed TX was observed modulating the bus (RX saw line low).
-  uint8_t get_last_tx_bus_active() const { return this->last_tx_bus_active; }
-
-  uint8_t txcollisionhandling{DALI_PHY_TX_COLLISION_AUTO};
+  uint8_t get_last_tx_bus_active() const { return this->last_tx_bus_active_; }
 
  private:
-  enum rx_stateEnum { EMPTY, RECEIVING, COMPLETED };
+  enum class ChannelState : uint8_t { OFF = 0, ARMED = 1, TX = 3 };
 
-  volatile uint8_t busstate{0};
-  volatile uint8_t idlecnt{0};
+  bool ensure_channels_created_();
+  void disable_channels_();
+  bool arm_rx_();
+  bool wait_ifg_(uint32_t timeout_ms);
+  bool transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms);
+  bool poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_decode_error);
+  void apply_ifg_();
+  uint32_t milli_() const;
+  uint8_t read_rx_level_() const;
 
-  volatile rx_stateEnum rxstate{EMPTY};
-  volatile uint8_t rxdata[DALI_PHY_RX_BUF_SIZE]{};
-  volatile uint8_t rxpos{0};
-  volatile uint8_t rxbyte{0};
-  volatile uint8_t rxbitcnt{0};
-  volatile uint8_t rxidle{0};
+  int tx_gpio_{-1};
+  int rx_gpio_{-1};
+  bool invert_tx_{true};
+  bool invert_rx_{false};
+  uint8_t (*bus_is_high_)(){nullptr};
 
-  volatile uint8_t txhbdata[9]{};
-  volatile uint8_t txhblen{0};
-  volatile uint8_t txhbcnt{0};
-  volatile uint8_t txspcnt{0};
-  volatile uint8_t txhigh{0};
-  volatile uint8_t txcollision{0};
-  volatile uint32_t isr_ticks{0};
-  volatile uint8_t tx_bus_active{0};
-  volatile uint8_t last_tx_bus_active{0};
-  volatile uint8_t last_backward_type{BACKWARD_TIMEOUT};
-  volatile uint8_t last_backward_data{0};
+  rmt_channel_handle_t rx_channel_{nullptr};
+  rmt_channel_handle_t tx_channel_{nullptr};
+  rmt_encoder_handle_t tx_encoder_{nullptr};
+  QueueHandle_t rx_queue_{nullptr};
+  rmt_receive_config_t rx_cfg_{};
+  rmt_symbol_word_t rx_raw_[32]{};
+  void *phy_ctx_{nullptr};
 
-  uint8_t (*bus_is_high)(){nullptr};
-  void (*bus_set_low)(){nullptr};
-  void (*bus_set_high)(){nullptr};
+  const rmt_symbol_word_t *symbol_one_{nullptr};
+  const rmt_symbol_word_t *symbol_zero_{nullptr};
+  const rmt_symbol_word_t *symbol_stop_{nullptr};
 
-  void _set_busstate_idle();
-  void _init();
-  void _tx_push_2hb(uint8_t hb);
-
-  uint8_t _man_weight(uint8_t i);
-  uint8_t _man_sample(volatile uint8_t *edata, uint16_t bitpos, uint8_t *stop_coll);
-  uint8_t _man_decode(volatile uint8_t *edata, uint8_t ebitlen, uint8_t *ddata);
+  ChannelState channel_state_{ChannelState::OFF};
+  uint32_t last_ifg_end_ms_{0};
+  uint32_t tx_count_{0};
+  uint8_t last_tx_bus_active_{0};
+  BackwardResultType last_backward_type_{BACKWARD_TIMEOUT};
+  uint8_t last_backward_data_{0};
+  bool initialized_{false};
 };
 
 }  // namespace dali_phy

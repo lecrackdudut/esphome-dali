@@ -1,42 +1,205 @@
 /*###########################################################################
         copyright qqqlab.com / github.com/qqqlab
         Adapted for ESPHome DALI component
+
+        RMT physical layer based on Espressif esp-iot-solution DALI driver
+        (Apache-2.0).
+
+        This program is free software: you can redistribute it and/or modify
+        it under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
 ###########################################################################*/
 #include "dali_phy.h"
 
+#include <string.h>
+
+#include "driver/gpio.h"
+#include "esp_attr.h"
+#include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 
 namespace dali_phy {
 
-// DALI spec: >22Te (~9.2 ms) idle before forward frame without backward response.
-// At 9600 Hz sampling: 90 samples ≈ 9.4 ms.
-static constexpr uint8_t BEFORE_CMD_IDLE_SAMPLES = 90;
+namespace {
 
-#define IDLE 0
-#define RX 1
-#define TX 3
-#define COLLISION_TX 4
+static const char *const TAG = "dali.phy";
 
-void DaliPhy::begin(uint8_t (*bus_is_high_fn)(), void (*bus_set_low_fn)(), void (*bus_set_high_fn)()) {
-  this->bus_is_high = bus_is_high_fn;
-  this->bus_set_low = bus_set_low_fn;
-  this->bus_set_high = bus_set_high_fn;
-  this->_init();
+static constexpr uint32_t DALI_RMT_RESOLUTION_HZ = 1000000U;
+static constexpr uint32_t DALI_TE_US = 416U;
+static constexpr uint32_t DALI_IFG_MS = 20;
+static constexpr uint32_t DALI_BF_TIMEOUT_MS = 25;
+static constexpr uint32_t DALI_DEFAULT_MEM_BLOCK = 64;
+
+static inline uint32_t us_to_rmt_ticks(uint32_t us) { return us * (DALI_RMT_RESOLUTION_HZ / 1000000U); }
+static inline uint32_t us_to_ns(uint32_t us) { return us * 1000U; }
+
+struct PhyContext {
+  const rmt_symbol_word_t *symbol_one;
+  const rmt_symbol_word_t *symbol_zero;
+  const rmt_symbol_word_t *symbol_stop;
+};
+
+static inline rmt_symbol_word_t make_rmt_symbol(uint16_t dur0, uint8_t lvl0, uint16_t dur1, uint8_t lvl1) {
+  rmt_symbol_word_t sym{};
+  sym.duration0 = dur0;
+  sym.level0 = lvl0;
+  sym.duration1 = dur1;
+  sym.level1 = lvl1;
+  return sym;
 }
 
-void DaliPhy::_set_busstate_idle() {
-  this->bus_set_high();
-  this->idlecnt = 0;
-  this->busstate = IDLE;
+static const uint16_t DALI_TE_TICKS = static_cast<uint16_t>(us_to_rmt_ticks(DALI_TE_US));
+
+static rmt_symbol_word_t make_sym_one_normal() {
+  return make_rmt_symbol(DALI_TE_TICKS, 0, DALI_TE_TICKS, 1);
+}
+static rmt_symbol_word_t make_sym_zero_normal() {
+  return make_rmt_symbol(DALI_TE_TICKS, 1, DALI_TE_TICKS, 0);
+}
+static rmt_symbol_word_t make_sym_stop_normal() {
+  return make_rmt_symbol(DALI_TE_TICKS * 2, 0, DALI_TE_TICKS * 2, 0);
+}
+static rmt_symbol_word_t make_sym_one_invert() {
+  return make_rmt_symbol(DALI_TE_TICKS, 1, DALI_TE_TICKS, 0);
+}
+static rmt_symbol_word_t make_sym_zero_invert() {
+  return make_rmt_symbol(DALI_TE_TICKS, 0, DALI_TE_TICKS, 1);
+}
+static rmt_symbol_word_t make_sym_stop_invert() {
+  return make_rmt_symbol(DALI_TE_TICKS * 2, 0, DALI_TE_TICKS * 2, 0);
 }
 
-void DaliPhy::_init() {
-  this->_set_busstate_idle();
-  this->rxstate = EMPTY;
-  this->txcollision = 0;
+static rmt_symbol_word_t s_sym_one_normal;
+static rmt_symbol_word_t s_sym_zero_normal;
+static rmt_symbol_word_t s_sym_stop_normal;
+static rmt_symbol_word_t s_sym_one_invert;
+static rmt_symbol_word_t s_sym_zero_invert;
+static rmt_symbol_word_t s_sym_stop_invert;
+static bool s_symbols_initialized = false;
+
+static void init_symbol_tables() {
+  if (s_symbols_initialized) {
+    return;
+  }
+  s_sym_one_normal = make_sym_one_normal();
+  s_sym_zero_normal = make_sym_zero_normal();
+  s_sym_stop_normal = make_sym_stop_normal();
+  s_sym_one_invert = make_sym_one_invert();
+  s_sym_zero_invert = make_sym_zero_invert();
+  s_sym_stop_invert = make_sym_stop_invert();
+  s_symbols_initialized = true;
 }
 
-uint32_t DaliPhy::milli() { return static_cast<uint32_t>(esp_timer_get_time() / 1000LL); }
+static size_t dali_tx_encode_cb(const void *data, size_t data_size, size_t symbols_written, size_t symbols_free,
+                               rmt_symbol_word_t *symbols, bool *done, void *arg) {
+  auto *ctx = static_cast<PhyContext *>(arg);
+  if (symbols_free < 10) {
+    return 0;
+  }
+  if (symbols_written == 0) {
+    symbols[0] = *ctx->symbol_one;
+    return 1;
+  }
+
+  const auto *bytes = static_cast<const uint8_t *>(data);
+  const size_t byte_idx = (symbols_written - 1) / 8;
+  if (byte_idx < data_size) {
+    size_t out = 0;
+    for (int mask = 0x80; mask != 0; mask >>= 1) {
+      symbols[out++] = (bytes[byte_idx] & mask) ? *ctx->symbol_one : *ctx->symbol_zero;
+    }
+    return out;
+  }
+
+  symbols[0] = *ctx->symbol_stop;
+  *done = true;
+  return 1;
+}
+
+static bool IRAM_ATTR dali_rx_done_cb(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
+  BaseType_t hp_woken = pdFALSE;
+  xQueueSendFromISR(static_cast<QueueHandle_t>(user_data), edata, &hp_woken);
+  return hp_woken == pdTRUE;
+}
+
+static esp_err_t decode_backward_frame_byte(const rmt_symbol_word_t *symbols, size_t num_symbols, uint8_t *out_byte,
+                                            uint8_t *out_bits_decoded) {
+  const uint32_t te_ticks = us_to_rmt_ticks(DALI_TE_US);
+  constexpr size_t max_te = 40;
+
+  uint8_t te_levels[max_te];
+  memset(te_levels, 0, max_te * sizeof(uint8_t));
+  size_t te_len = 0;
+
+  for (size_t i = 0; i < num_symbols && te_len < max_te; i++) {
+    uint32_t n0 = (symbols[i].duration0 + (te_ticks / 2)) / te_ticks;
+    uint32_t n1 = (symbols[i].duration1 + (te_ticks / 2)) / te_ticks;
+    if (n0 == 0) {
+      n0 = 1;
+    } else if (n0 > 8) {
+      n0 = 8;
+    }
+    if (n1 == 0) {
+      n1 = 1;
+    } else if (n1 > 8) {
+      n1 = 8;
+    }
+
+    for (uint32_t k = 0; k < n0 && te_len < max_te; k++) {
+      te_levels[te_len++] = static_cast<uint8_t>(symbols[i].level0 & 0x01U);
+    }
+    for (uint32_t k = 0; k < n1 && te_len < max_te; k++) {
+      te_levels[te_len++] = static_cast<uint8_t>(symbols[i].level1 & 0x01U);
+    }
+  }
+
+  if (te_len > 26) {
+    *out_bits_decoded = 0;
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  size_t start = 0;
+  while (start + 1 < te_len && te_levels[start] == te_levels[start + 1]) {
+    start++;
+  }
+  if (start + 1 >= te_len) {
+    *out_bits_decoded = 0;
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  const uint8_t one_a = te_levels[start];
+  const uint8_t one_b = te_levels[start + 1];
+  if (one_a == one_b) {
+    *out_bits_decoded = 0;
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t frame = 0;
+  uint8_t bits = 0;
+  size_t idx = start + 2;
+  while (bits < 8 && (idx + 1) < te_len) {
+    const uint8_t a = te_levels[idx];
+    const uint8_t b = te_levels[idx + 1];
+    if (a == one_a && b == one_b) {
+      frame = static_cast<uint8_t>((frame << 1) | 1U);
+      bits++;
+    } else if (a == one_b && b == one_a) {
+      frame = static_cast<uint8_t>(frame << 1);
+      bits++;
+    } else {
+      break;
+    }
+    idx += 2;
+  }
+
+  *out_byte = frame;
+  *out_bits_decoded = bits;
+  return (bits == 8) ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+}  // namespace
 
 const char *phy_result_name(uint8_t code) {
   switch (code) {
@@ -74,312 +237,385 @@ const char *backward_result_name(BackwardResultType type) {
   }
 }
 
-PhySnapshot DaliPhy::get_snapshot() const {
-  PhySnapshot snap{};
-  snap.busstate = this->busstate;
-  snap.idlecnt = this->idlecnt;
-  snap.txcollision = this->txcollision;
-  snap.rx_gpio_level = this->bus_is_high != nullptr ? this->bus_is_high() : 0;
-  snap.isr_ticks = this->isr_ticks;
-  snap.last_tx_bus_active = this->last_tx_bus_active;
-  snap.last_backward_type = static_cast<BackwardResultType>(this->last_backward_type);
-  snap.last_backward_data = this->last_backward_data;
-  return snap;
+DaliPhy::~DaliPhy() { this->end(); }
+
+bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, uint8_t (*bus_is_high)()) {
+  this->end();
+
+  if (tx_gpio < 0 || rx_gpio < 0) {
+    ESP_LOGE(TAG, "Invalid GPIO: tx=%d rx=%d", tx_gpio, rx_gpio);
+    return false;
+  }
+
+  this->tx_gpio_ = tx_gpio;
+  this->rx_gpio_ = rx_gpio;
+  this->invert_tx_ = invert_tx;
+  this->invert_rx_ = invert_rx;
+  this->bus_is_high_ = bus_is_high;
+  init_symbol_tables();
+
+  if (invert_tx) {
+    this->symbol_one_ = &s_sym_one_invert;
+    this->symbol_zero_ = &s_sym_zero_invert;
+    this->symbol_stop_ = &s_sym_stop_invert;
+  } else {
+    this->symbol_one_ = &s_sym_one_normal;
+    this->symbol_zero_ = &s_sym_zero_normal;
+    this->symbol_stop_ = &s_sym_stop_normal;
+  }
+
+  auto *ctx = new PhyContext{
+      .symbol_one = this->symbol_one_,
+      .symbol_zero = this->symbol_zero_,
+      .symbol_stop = this->symbol_stop_,
+  };
+  if (ctx == nullptr) {
+    ESP_LOGE(TAG, "Out of memory allocating encoder context");
+    return false;
+  }
+  this->phy_ctx_ = ctx;
+
+  gpio_set_direction(static_cast<gpio_num_t>(rx_gpio), GPIO_MODE_INPUT);
+  gpio_set_direction(static_cast<gpio_num_t>(tx_gpio), GPIO_MODE_OUTPUT);
+  gpio_set_level(static_cast<gpio_num_t>(tx_gpio), invert_tx ? 1 : 0);
+
+  if (!this->ensure_channels_created_()) {
+    this->end();
+    return false;
+  }
+
+  this->last_ifg_end_ms_ = 0;
+  this->tx_count_ = 0;
+  this->last_tx_bus_active_ = 0;
+  this->last_backward_type_ = BACKWARD_TIMEOUT;
+  this->last_backward_data_ = 0;
+  this->initialized_ = true;
+
+  ESP_LOGI(TAG, "RMT PHY ready (TX GPIO %d%s, RX GPIO %d%s)", tx_gpio, invert_tx ? " inv" : "", rx_gpio,
+           invert_rx ? " inv" : "");
+  return true;
 }
 
-void DaliPhy::timer() {
-  this->isr_ticks++;
-  uint8_t busishigh = (this->bus_is_high() ? 1 : 0);
+void DaliPhy::end() {
+  this->disable_channels_();
 
-  switch (this->busstate) {
-    case IDLE:
-      if (busishigh) {
-        if (this->idlecnt != 0xff)
-          this->idlecnt++;
-        break;
-      }
-      this->rxpos = 0;
-      this->rxbitcnt = 0;
-      this->rxidle = 0;
-      this->rxstate = RECEIVING;
-      this->busstate = RX;
-      // fall through
-    case RX:
-      this->rxbyte = (this->rxbyte << 1) | busishigh;
-      this->rxbitcnt++;
-      if (this->rxbitcnt == 8) {
-        this->rxdata[this->rxpos] = this->rxbyte;
-        this->rxpos++;
-        if (this->rxpos > DALI_PHY_RX_BUF_SIZE - 1)
-          this->rxpos = DALI_PHY_RX_BUF_SIZE - 1;
-        this->rxbitcnt = 0;
-      }
-      if (busishigh) {
-        this->rxidle++;
-        if (this->rxidle >= 16) {
-          this->rxdata[this->rxpos] = 0xFF;
-          this->rxpos++;
-          this->rxstate = COMPLETED;
-          this->_set_busstate_idle();
-          break;
-        }
-      } else {
-        this->rxidle = 0;
-      }
-      break;
-    case TX:
-      if (!busishigh)
-        this->tx_bus_active = 1;
-      if (this->txhbcnt >= this->txhblen) {
-        this->_set_busstate_idle();
-      } else {
-        if (((this->txcollisionhandling == DALI_PHY_TX_COLLISION_ON) ||
-             (this->txcollisionhandling == DALI_PHY_TX_COLLISION_AUTO && this->txhblen != 2 + 8 + 4)) &&
-            (this->txhigh && !busishigh) && (this->txspcnt == 1 || this->txspcnt == 2)) {
-          if (this->txcollision != 0xFF)
-            this->txcollision++;
-          this->txspcnt = 0;
-          this->busstate = COLLISION_TX;
-          return;
-        }
+  if (this->tx_encoder_ != nullptr) {
+    rmt_del_encoder(this->tx_encoder_);
+    this->tx_encoder_ = nullptr;
+  }
+  if (this->tx_channel_ != nullptr) {
+    rmt_del_channel(this->tx_channel_);
+    this->tx_channel_ = nullptr;
+  }
+  if (this->rx_channel_ != nullptr) {
+    rmt_del_channel(this->rx_channel_);
+    this->rx_channel_ = nullptr;
+  }
+  if (this->rx_queue_ != nullptr) {
+    vQueueDelete(this->rx_queue_);
+    this->rx_queue_ = nullptr;
+  }
+  if (this->phy_ctx_ != nullptr) {
+    delete static_cast<PhyContext *>(this->phy_ctx_);
+    this->phy_ctx_ = nullptr;
+  }
 
-        if (this->txspcnt == 0) {
-          uint8_t pos = this->txhbcnt >> 3;
-          uint8_t bitmask = 1 << (7 - (this->txhbcnt & 0x7));
-          if (this->txhbdata[pos] & bitmask) {
-            this->bus_set_low();
-            this->txhigh = 0;
-          } else {
-            this->bus_set_high();
-            this->txhigh = 1;
-          }
-          this->txhbcnt++;
-          this->txspcnt = 4;
-        }
-        this->txspcnt--;
-      }
-      break;
-    case COLLISION_TX:
-      this->tx_bus_active = 1;
-      this->bus_set_low();
-      this->txspcnt++;
-      if (this->txspcnt >= 16)
-        this->_set_busstate_idle();
-      break;
+  this->initialized_ = false;
+  this->channel_state_ = ChannelState::OFF;
+}
+
+bool DaliPhy::ensure_channels_created_() {
+  if (this->rx_channel_ != nullptr && this->tx_channel_ != nullptr) {
+    return true;
+  }
+
+  this->rx_queue_ = xQueueCreate(4, sizeof(rmt_rx_done_event_data_t));
+  if (this->rx_queue_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create RX queue");
+    return false;
+  }
+
+  rmt_rx_channel_config_t rx_channel_cfg = {};
+  rx_channel_cfg.gpio_num = static_cast<gpio_num_t>(this->rx_gpio_);
+  rx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+  rx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
+  rx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
+  rx_channel_cfg.flags.invert_in = this->invert_rx_ ? 1U : 0U;
+  if (rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create RX channel");
+    return false;
+  }
+
+  rmt_rx_event_callbacks_t rx_cbs = {
+      .on_recv_done = dali_rx_done_cb,
+  };
+  if (rmt_rx_register_event_callbacks(this->rx_channel_, &rx_cbs, this->rx_queue_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to register RX callbacks");
+    return false;
+  }
+
+  this->rx_cfg_.signal_range_min_ns = us_to_ns(2);
+  this->rx_cfg_.signal_range_max_ns = us_to_ns(2000);
+
+  rmt_tx_channel_config_t tx_channel_cfg = {};
+  tx_channel_cfg.gpio_num = static_cast<gpio_num_t>(this->tx_gpio_);
+  tx_channel_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+  tx_channel_cfg.resolution_hz = DALI_RMT_RESOLUTION_HZ;
+  tx_channel_cfg.mem_block_symbols = DALI_DEFAULT_MEM_BLOCK;
+  tx_channel_cfg.trans_queue_depth = 4;
+  if (rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX channel");
+    return false;
+  }
+
+  const rmt_simple_encoder_config_t enc_cfg = {
+      .callback = dali_tx_encode_cb,
+      .arg = this->phy_ctx_,
+  };
+  if (rmt_new_simple_encoder(&enc_cfg, &this->tx_encoder_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create TX encoder");
+    return false;
+  }
+
+  return true;
+}
+
+void DaliPhy::disable_channels_() {
+  if (this->rx_channel_ != nullptr) {
+    rmt_disable(this->rx_channel_);
+  }
+  if (this->tx_channel_ != nullptr) {
+    rmt_disable(this->tx_channel_);
+  }
+  if (this->rx_queue_ != nullptr) {
+    xQueueReset(this->rx_queue_);
+  }
+  this->channel_state_ = ChannelState::OFF;
+}
+
+bool DaliPhy::arm_rx_() {
+  if (!this->initialized_ || this->rx_channel_ == nullptr) {
+    return false;
+  }
+
+  xQueueReset(this->rx_queue_);
+  if (rmt_receive(this->rx_channel_, this->rx_raw_, sizeof(this->rx_raw_), &this->rx_cfg_) != ESP_OK) {
+    ESP_LOGE(TAG, "rmt_receive failed");
+    return false;
+  }
+  this->channel_state_ = ChannelState::ARMED;
+  return true;
+}
+
+bool DaliPhy::wait_ifg_(uint32_t timeout_ms) {
+  const uint32_t start_ms = this->milli_();
+  while (true) {
+    const uint32_t now_ms = this->milli_();
+    if (this->last_ifg_end_ms_ == 0 || now_ms - this->last_ifg_end_ms_ >= DALI_IFG_MS) {
+      return true;
+    }
+    if (now_ms - start_ms > timeout_ms) {
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
-void DaliPhy::_tx_push_2hb(uint8_t hb) {
-  uint8_t pos = this->txhblen >> 3;
-  uint8_t shift = 6 - (this->txhblen & 0x7);
-  this->txhbdata[pos] |= hb << shift;
-  this->txhblen += 2;
-}
+uint32_t DaliPhy::milli_() const { return static_cast<uint32_t>(esp_timer_get_time() / 1000LL); }
 
-uint8_t DaliPhy::tx(uint8_t *data, uint8_t bitlen) {
-  if (bitlen > 32)
-    return DALI_PHY_RESULT_FRAME_TOO_LONG;
-  if (this->busstate != IDLE)
-    return DALI_PHY_RESULT_BUS_NOT_IDLE;
-
-  for (uint8_t i = 0; i < 9; i++)
-    this->txhbdata[i] = 0;
-
-  this->txhblen = 0;
-  this->_tx_push_2hb(0x2);
-  for (uint8_t i = 0; i < bitlen; i++) {
-    uint8_t pos = i >> 3;
-    uint8_t mask = 1 << (7 - (i & 0x7));
-    this->_tx_push_2hb(data[pos] & mask ? 0x2 : 0x1);
+uint8_t DaliPhy::read_rx_level_() const {
+  if (this->bus_is_high_ != nullptr) {
+    return this->bus_is_high_();
   }
-  this->_tx_push_2hb(0x0);
-  this->_tx_push_2hb(0x0);
-
-  this->txhbcnt = 0;
-  this->txspcnt = 0;
-  this->txcollision = 0;
-  this->tx_bus_active = 0;
-  this->rxstate = EMPTY;
-  this->rxpos = 0;
-  this->rxbitcnt = 0;
-  this->rxidle = 0;
-  this->rxbyte = 0;
-  this->busstate = TX;
-  return DALI_PHY_OK;
-}
-
-uint8_t DaliPhy::tx_state() {
-  if (this->txcollision) {
-    this->txcollision = 0;
-    return DALI_PHY_RESULT_COLLISION;
+  if (this->rx_gpio_ >= 0) {
+    return gpio_get_level(static_cast<gpio_num_t>(this->rx_gpio_));
   }
-  if (this->busstate == TX)
-    return DALI_PHY_RESULT_TRANSMITTING;
-  return DALI_PHY_OK;
+  return 0;
 }
 
-uint8_t DaliPhy::_man_weight(uint8_t i) {
-  int8_t w = 0;
-  w += ((i >> 7) & 1) ? 1 : -1;
-  w += ((i >> 6) & 1) ? 2 : -2;
-  w += ((i >> 5) & 1) ? 2 : -2;
-  w += ((i >> 4) & 1) ? 1 : -1;
-  w -= ((i >> 3) & 1) ? 1 : -1;
-  w -= ((i >> 2) & 1) ? 2 : -2;
-  w -= ((i >> 1) & 1) ? 2 : -2;
-  w -= ((i >> 0) & 1) ? 1 : -1;
-  w *= 2;
-  if (w < 0)
-    w = -w + 1;
-  return static_cast<uint8_t>(w);
+bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
+  if (!this->initialized_) {
+    return false;
+  }
+  if (bitlen > 32) {
+    return false;
+  }
+
+  const uint8_t byte_count = static_cast<uint8_t>((bitlen + 7U) / 8U);
+
+  if (rmt_enable(this->tx_channel_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable TX channel");
+    return false;
+  }
+  if (rmt_enable(this->rx_channel_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable RX channel");
+    rmt_disable(this->tx_channel_);
+    return false;
+  }
+
+  if (!this->arm_rx_()) {
+    rmt_disable(this->rx_channel_);
+    rmt_disable(this->tx_channel_);
+    return false;
+  }
+
+  this->channel_state_ = ChannelState::TX;
+  const rmt_transmit_config_t tx_cfg = {.loop_count = 0};
+  esp_err_t tx_err = rmt_transmit(this->tx_channel_, this->tx_encoder_, data, byte_count, &tx_cfg);
+  if (tx_err == ESP_OK) {
+    tx_err = rmt_tx_wait_all_done(this->tx_channel_, timeout_ms);
+  }
+
+  this->tx_count_++;
+
+  if (tx_err != ESP_OK) {
+    ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(tx_err));
+    this->disable_channels_();
+    return false;
+  }
+
+  bool bus_active = this->read_rx_level_() == 0;
+  rmt_rx_done_event_data_t rx_data;
+  if (xQueueReceive(this->rx_queue_, &rx_data, 0) == pdTRUE) {
+    bus_active = bus_active || rx_data.num_symbols > 0;
+    if (!this->arm_rx_()) {
+      this->disable_channels_();
+      return false;
+    }
+  }
+
+  this->last_tx_bus_active_ = bus_active ? 1U : 0U;
+  this->channel_state_ = ChannelState::ARMED;
+  return true;
 }
 
-uint8_t DaliPhy::_man_sample(volatile uint8_t *edata, uint16_t bitpos, uint8_t *stop_coll) {
-  uint8_t pos = bitpos >> 3;
-  uint8_t shift = bitpos & 0x7;
-  uint8_t sample = (edata[pos] << shift) | (edata[pos + 1] >> (8 - shift));
+bool DaliPhy::poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_decode_error) {
+  if (this->rx_queue_ == nullptr) {
+    return false;
+  }
 
-  if (sample == 0xFF)
-    *stop_coll = 1;
-  if (sample == 0x00)
-    *stop_coll = 2;
-
-  return sample;
-}
-
-uint8_t DaliPhy::_man_decode(volatile uint8_t *edata, uint8_t ebitlen, uint8_t *ddata) {
-  uint8_t dbitlen = 0;
-  uint16_t ebitpos = 1;
-  while (ebitpos + 1 < ebitlen) {
-    uint8_t stop_coll = 0;
-    uint8_t sample = this->_man_sample(edata, ebitpos, &stop_coll);
-    uint8_t weightmax = this->_man_weight(sample);
-    uint8_t pmax = 8;
-
-    sample = this->_man_sample(edata, ebitpos - 1, &stop_coll);
-    uint8_t w = this->_man_weight(sample);
-    if (weightmax < w) {
-      weightmax = w;
-      pmax = 7;
+  const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(wait_ms);
+  while (true) {
+    const TickType_t now = xTaskGetTickCount();
+    if (now >= deadline) {
+      return false;
     }
 
-    sample = this->_man_sample(edata, ebitpos + 1, &stop_coll);
-    w = this->_man_weight(sample);
-    if (weightmax < w) {
-      weightmax = w;
-      pmax = 9;
+    rmt_rx_done_event_data_t rx_data;
+    if (xQueueReceive(this->rx_queue_, &rx_data, deadline - now) != pdTRUE) {
+      return false;
     }
 
-    if (stop_coll == 1)
-      break;
-    if (stop_coll == 2)
-      return 0;
-
-    if (dbitlen > 0) {
-      uint8_t bytepos = (dbitlen - 1) >> 3;
-      uint8_t bitpos = (dbitlen - 1) & 0x7;
-      if (bitpos == 0)
-        ddata[bytepos] = 0;
-      ddata[bytepos] = (ddata[bytepos] << 1) | (weightmax & 1);
+    uint8_t frame = 0;
+    uint8_t bit_count = 0;
+    const esp_err_t dec_err =
+        decode_backward_frame_byte(rx_data.received_symbols, rx_data.num_symbols, &frame, &bit_count);
+    if (dec_err == ESP_OK) {
+      *out_byte = frame;
+      if (out_decode_error != nullptr) {
+        *out_decode_error = false;
+      }
+      return true;
     }
-    dbitlen++;
-    ebitpos += pmax;
+
+    if (out_decode_error != nullptr) {
+      *out_decode_error = true;
+    }
+
+    if (rmt_receive(this->rx_channel_, this->rx_raw_, sizeof(this->rx_raw_), &this->rx_cfg_) != ESP_OK) {
+      ESP_LOGE(TAG, "rmt_receive re-arm failed");
+      return false;
+    }
   }
-  if (dbitlen > 1)
-    dbitlen--;
-  return dbitlen;
 }
 
-uint8_t DaliPhy::rx(uint8_t *ddata) {
-  switch (this->rxstate) {
-    case EMPTY:
-      return 0;
-    case RECEIVING:
-      return 1;
-    case COMPLETED:
-      this->rxstate = EMPTY;
-      {
-        uint8_t dlen = this->_man_decode(this->rxdata, this->rxpos * 8, ddata);
-        if (dlen < 3)
-          return 2;
-        return dlen;
-      }
-    default:
-      return 0;
-  }
+void DaliPhy::apply_ifg_() {
+  this->disable_channels_();
+  vTaskDelay(pdMS_TO_TICKS(DALI_IFG_MS));
+  this->last_ifg_end_ms_ = this->milli_();
+  this->channel_state_ = ChannelState::OFF;
 }
 
 uint8_t DaliPhy::tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
-  if (bitlen > 32)
+  if (bitlen > 32) {
     return DALI_PHY_RESULT_FRAME_TOO_LONG;
-  uint32_t start_ms = this->milli();
-  while (true) {
-    while (this->idlecnt < BEFORE_CMD_IDLE_SAMPLES) {
-      if (this->milli() - start_ms > timeout_ms)
-        return DALI_PHY_RESULT_TIMEOUT;
-    }
-    while (this->tx(data, bitlen) != DALI_PHY_OK) {
-      if (this->milli() - start_ms > timeout_ms)
-        return DALI_PHY_RESULT_TIMEOUT;
-    }
-    uint8_t rv;
-    while (true) {
-      rv = this->tx_state();
-      if (rv != DALI_PHY_RESULT_TRANSMITTING)
-        break;
-      if (this->milli() - start_ms > timeout_ms)
-        return DALI_PHY_RESULT_TIMEOUT;
-    }
-    if (rv == DALI_PHY_OK) {
-      this->last_tx_bus_active = this->tx_bus_active;
-      int64_t start_us = esp_timer_get_time();
-      while (esp_timer_get_time() - start_us < 1000)
-        __asm__ __volatile__("nop");
-      return DALI_PHY_OK;
-    }
   }
+  if (!this->initialized_) {
+    return DALI_PHY_RESULT_TIMEOUT;
+  }
+
+  if (!this->wait_ifg_(timeout_ms)) {
+    return DALI_PHY_RESULT_BUS_NOT_IDLE;
+  }
+
+  if (!this->transmit_forward_(data, bitlen, timeout_ms)) {
+    return DALI_PHY_RESULT_TIMEOUT;
+  }
+
+  return DALI_PHY_OK;
 }
 
 BackwardResult DaliPhy::receive_backward_detailed(uint32_t timeout_ms) {
-  uint8_t data[4];
-  uint32_t rx_start_ms = this->milli();
-  uint32_t rx_timeout_ms = timeout_ms < 10 ? timeout_ms : 10;
-
-  while (true) {
-    uint8_t rv = this->rx(data);
-    switch (rv) {
-      case 0:
-        break;
-      case 1:
-        rx_timeout_ms = timeout_ms < 25 ? timeout_ms : 25;
-        break;
-      case 2:
-        this->last_backward_type = BACKWARD_DECODE_ERROR;
-        this->last_backward_data = 0;
-        return {BACKWARD_DECODE_ERROR, 0};
-      default:
-        if (rv == 8) {
-          this->last_backward_type = BACKWARD_REPLY;
-          this->last_backward_data = data[0];
-          return {BACKWARD_REPLY, data[0]};
-        }
-        this->last_backward_type = BACKWARD_DECODE_ERROR;
-        this->last_backward_data = 0;
-        return {BACKWARD_DECODE_ERROR, 0};
-    }
-    if (this->milli() - rx_start_ms > rx_timeout_ms) {
-      this->last_backward_type = BACKWARD_TIMEOUT;
-      this->last_backward_data = 0;
-      return {BACKWARD_TIMEOUT, 0};
-    }
+  BackwardResult result{BACKWARD_TIMEOUT, 0};
+  if (!this->initialized_ || this->channel_state_ != ChannelState::ARMED) {
+    this->last_backward_type_ = BACKWARD_TIMEOUT;
+    this->last_backward_data_ = 0;
+    this->apply_ifg_();
+    return result;
   }
+
+  const uint32_t wait_ms = timeout_ms < DALI_BF_TIMEOUT_MS ? timeout_ms : DALI_BF_TIMEOUT_MS;
+  uint8_t reply = 0;
+  bool decode_error = false;
+
+  if (this->poll_rx_event_(wait_ms, &reply, &decode_error)) {
+    result.type = BACKWARD_REPLY;
+    result.data = reply;
+    this->last_backward_type_ = BACKWARD_REPLY;
+    this->last_backward_data_ = reply;
+    this->apply_ifg_();
+    return result;
+  }
+
+  if (decode_error) {
+    result.type = BACKWARD_DECODE_ERROR;
+    this->last_backward_type_ = BACKWARD_DECODE_ERROR;
+    this->last_backward_data_ = 0;
+    this->apply_ifg_();
+    return result;
+  }
+
+  this->last_backward_type_ = BACKWARD_TIMEOUT;
+  this->last_backward_data_ = 0;
+  this->apply_ifg_();
+  return result;
 }
 
 uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
-  BackwardResult result = this->receive_backward_detailed(timeout_ms);
-  if (result.type == BACKWARD_REPLY)
+  const BackwardResult result = this->receive_backward_detailed(timeout_ms);
+  if (result.type == BACKWARD_REPLY) {
     return result.data;
+  }
   return 0;
+}
+
+PhySnapshot DaliPhy::get_snapshot() const {
+  PhySnapshot snap{};
+  snap.busstate = static_cast<uint8_t>(this->channel_state_);
+  const uint32_t now_ms = this->milli_();
+  if (this->last_ifg_end_ms_ == 0) {
+    snap.idle_ms = 255U;
+  } else {
+    const uint32_t idle = now_ms - this->last_ifg_end_ms_;
+    snap.idle_ms = idle > 255U ? 255U : static_cast<uint8_t>(idle);
+  }
+  snap.txcollision = 0;
+  snap.rx_gpio_level = this->read_rx_level_();
+  snap.tx_count = this->tx_count_;
+  snap.last_tx_bus_active = this->last_tx_bus_active_;
+  snap.last_backward_type = this->last_backward_type_;
+  snap.last_backward_data = this->last_backward_data_;
+  return snap;
 }
 
 }  // namespace dali_phy

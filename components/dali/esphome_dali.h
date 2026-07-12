@@ -70,6 +70,8 @@ public:
 
     void set_tx_pin(esphome::GPIOPin* tx_pin) { m_txPin = tx_pin; }
     void set_rx_pin(esphome::GPIOPin* rx_pin) { m_rxPin = rx_pin; }
+    void set_invert_tx(bool invert_tx) { m_invert_tx = invert_tx; }
+    void set_invert_rx(bool invert_rx) { m_invert_rx = invert_rx; }
     void set_debug_tx_rx(bool enabled) { m_debug_tx_rx = enabled; }
     void set_bus_status_sensor(DaliBusStatusBinarySensor *sensor) { m_bus_status_sensor = sensor; }
     void set_diag_sensor(DaliDiagTextSensor *sensor) { m_diag_sensor = sensor; }
@@ -109,7 +111,6 @@ public:
     bool check_bus_health();
     void attempt_bus_recovery();
     void log_phy_snapshot(bool force = false);
-    void update_isr_rate();
     void publish_diagnostics();
     const char *build_diag_string(char *buf, size_t buflen) const;
 
@@ -117,7 +118,7 @@ public:
 
     uint32_t get_tx_error_count() const { return m_tx_error_count; }
     uint32_t get_tx_silent_count() const { return m_tx_silent_count; }
-    uint32_t get_isr_rate() const { return m_isr_rate; }
+    uint32_t get_tx_count() const { return m_tx_count; }
 
 public: // DaliPort
     void resetBus() override;
@@ -126,8 +127,7 @@ public: // DaliPort
 
 private:
     void init_phy();
-    void start_phy_timer();
-    void stop_phy_timer();
+    void shutdown_phy();
     void create_light_component(short_addr_t short_addr, uint32_t long_addr);
     void ensure_bus_mutex();
     bool lock_bus(uint32_t timeout_ms = 600);
@@ -137,7 +137,6 @@ private:
     static const char *phy_busstate_name(uint8_t busstate);
 
     dali_phy::DaliPhy m_phy;
-    void* m_timer{nullptr};
     void* m_bus_mutex{nullptr};
 
     esphome::GPIOPin* m_rxPin{nullptr};
@@ -145,6 +144,8 @@ private:
     DaliBusStatusBinarySensor *m_bus_status_sensor{nullptr};
     DaliDiagTextSensor *m_diag_sensor{nullptr};
 
+    bool m_invert_tx{true};
+    bool m_invert_rx{false};
     bool m_discovery = false;
     bool m_debug_tx_rx = false;
     uint32_t m_boot_delay_ms{30000};
@@ -157,12 +158,10 @@ private:
 
     uint32_t m_tx_error_count{0};
     uint32_t m_tx_silent_count{0};
+    uint32_t m_tx_count{0};
     uint8_t m_consecutive_bus_failures{0};
     uint32_t m_last_phy_log_ms{0};
     uint8_t m_last_logged_busstate{0xFF};
-    uint32_t m_isr_rate{0};
-    uint32_t m_last_isr_ticks{0};
-    uint32_t m_last_isr_sample_ms{0};
     uint32_t m_last_recovery_ms{0};
 
     // Dynamic lights created during discovery are not in ESPHome's looping_components_

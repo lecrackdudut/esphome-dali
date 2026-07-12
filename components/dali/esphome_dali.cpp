@@ -5,8 +5,7 @@
 #include "esphome_dali_light.h"
 #include "port.h"
 
-#if defined(USE_ESP32) && defined(ARDUINO)
-#include <esp32-hal-timer.h>
+#if defined(USE_ESP32)
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #endif
@@ -32,37 +31,19 @@ public:
 };
 
 gpio_num_t s_rx_gpio = GPIO_NUM_NC;
-gpio_num_t s_tx_gpio = GPIO_NUM_NC;
-dali_phy::DaliPhy* s_phy = nullptr;
 
 gpio_num_t pin_to_gpio(esphome::GPIOPin* pin) {
     return static_cast<gpio_num_t>(static_cast<esphome::InternalGPIOPin*>(pin)->get_pin());
 }
 
-uint8_t IRAM_ATTR phy_bus_is_high() {
+uint8_t phy_bus_is_high() {
     return gpio_get_level(s_rx_gpio);
 }
-
-void IRAM_ATTR phy_bus_assert() {
-    gpio_set_level(s_tx_gpio, 1);
-}
-
-void IRAM_ATTR phy_bus_release() {
-    gpio_set_level(s_tx_gpio, 0);
-}
-
-#if defined(USE_ESP32) && defined(ARDUINO)
-void ARDUINO_ISR_ATTR on_dali_timer() {
-    if (s_phy != nullptr) {
-        s_phy->timer();
-    }
-}
-#endif
 
 }  // namespace
 
 void DaliBusComponent::ensure_bus_mutex() {
-#if defined(USE_ESP32) && defined(ARDUINO)
+#if defined(USE_ESP32)
     if (this->m_bus_mutex == nullptr) {
         this->m_bus_mutex = xSemaphoreCreateRecursiveMutex();
     }
@@ -70,7 +51,7 @@ void DaliBusComponent::ensure_bus_mutex() {
 }
 
 bool DaliBusComponent::lock_bus(uint32_t timeout_ms) {
-#if defined(USE_ESP32) && defined(ARDUINO)
+#if defined(USE_ESP32)
     this->ensure_bus_mutex();
     if (this->m_bus_mutex == nullptr) {
         return true;
@@ -82,7 +63,7 @@ bool DaliBusComponent::lock_bus(uint32_t timeout_ms) {
 }
 
 void DaliBusComponent::unlock_bus() {
-#if defined(USE_ESP32) && defined(ARDUINO)
+#if defined(USE_ESP32)
     if (this->m_bus_mutex != nullptr) {
         xSemaphoreGiveRecursive(static_cast<SemaphoreHandle_t>(this->m_bus_mutex));
     }
@@ -91,10 +72,9 @@ void DaliBusComponent::unlock_bus() {
 
 const char *DaliBusComponent::phy_busstate_name(uint8_t busstate) {
     switch (busstate) {
-        case 0: return "IDLE";
-        case 1: return "RX";
-        case 3: return "TX";
-        case 4: return "COLLISION_TX";
+        case dali_phy::PHY_BUSSTATE_IDLE: return "IDLE";
+        case dali_phy::PHY_BUSSTATE_RX_ARMED: return "RX_ARMED";
+        case dali_phy::PHY_BUSSTATE_TX: return "TX";
         default: return "UNKNOWN";
     }
 }
@@ -113,49 +93,24 @@ void DaliBusComponent::log_phy_snapshot(bool force) {
     this->m_last_phy_log_ms = now;
     this->m_last_logged_busstate = snap.busstate;
 
-    DALI_LOGD("PHY state=%s idlecnt=%u rx=%u collisions=%u tx_errors=%u tx_silent=%u isr=%u/s",
+    DALI_LOGD("PHY state=%s idle=%ums rx=%u tx_count=%u tx_errors=%u tx_silent=%u tx_act=%u",
               phy_busstate_name(snap.busstate),
-              snap.idlecnt,
+              snap.idle_ms,
               snap.rx_gpio_level,
-              snap.txcollision,
+              snap.tx_count,
               this->m_tx_error_count,
               this->m_tx_silent_count,
-              this->m_isr_rate);
-}
-
-void DaliBusComponent::update_isr_rate() {
-    const uint32_t now = millis();
-    dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
-
-    if (this->m_last_isr_sample_ms == 0) {
-        this->m_last_isr_sample_ms = now;
-        this->m_last_isr_ticks = snap.isr_ticks;
-        return;
-    }
-
-    const uint32_t elapsed = now - this->m_last_isr_sample_ms;
-    if (elapsed < 1000) {
-        return;
-    }
-
-    const uint32_t delta = snap.isr_ticks - this->m_last_isr_ticks;
-    this->m_isr_rate = (delta * 1000U) / elapsed;
-    this->m_last_isr_sample_ms = now;
-    this->m_last_isr_ticks = snap.isr_ticks;
-
-    if (this->m_isr_rate < 9000 || this->m_isr_rate > 10200) {
-        DALI_LOGW("ISR tick rate out of range: %u/s (expected ~9600)", this->m_isr_rate);
-    }
+              snap.last_tx_bus_active);
 }
 
 const char *DaliBusComponent::build_diag_string(char *buf, size_t buflen) const {
     dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
     snprintf(buf, buflen,
-             "isr=%u/s phy=%s rx=%u idle=%u tx_act=%u rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
-             this->m_isr_rate,
+             "phy=rmt state=%s idle=%ums rx=%u tx=%u tx_act=%u rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
              phy_busstate_name(snap.busstate),
+             snap.idle_ms,
              snap.rx_gpio_level,
-             snap.idlecnt,
+             snap.tx_count,
              snap.last_tx_bus_active,
              dali_phy::backward_result_name(snap.last_backward_type),
              snap.last_backward_data,
@@ -191,12 +146,12 @@ bool DaliBusComponent::check_bus_health() {
         this->m_consecutive_bus_failures = 0;
     } else {
         this->m_consecutive_bus_failures++;
-        DALI_LOGW("Bus health check failed (%u consecutive): rx_last=%s(%02x) tx_act=%u isr=%u/s",
+        DALI_LOGW("Bus health check failed (%u consecutive): rx_last=%s(%02x) tx_act=%u tx_count=%u",
                   this->m_consecutive_bus_failures,
                   dali_phy::backward_result_name(snap.last_backward_type),
                   snap.last_backward_data,
                   snap.last_tx_bus_active,
-                  this->m_isr_rate);
+                  snap.tx_count);
         const uint32_t now = millis();
         if (this->m_consecutive_bus_failures >= BUS_STATUS_FAILURE_THRESHOLD &&
             (this->m_last_recovery_ms == 0 || now - this->m_last_recovery_ms >= RECOVERY_COOLDOWN_MS)) {
@@ -315,46 +270,26 @@ void DaliBusComponent::wait_for_boot_delay() {
 
 void DaliBusComponent::init_phy() {
     s_rx_gpio = pin_to_gpio(this->m_rxPin);
-    s_tx_gpio = pin_to_gpio(this->m_txPin);
-    s_phy = &this->m_phy;
+    const gpio_num_t tx_gpio = pin_to_gpio(this->m_txPin);
 
     this->m_txPin->pin_mode(gpio::Flags::FLAG_OUTPUT);
     this->m_rxPin->pin_mode(gpio::Flags::FLAG_INPUT);
     this->m_txPin->digital_write(false);
 
-    // Inverted opto TX: assert = GPIO high, release = GPIO low (same as WS_DALI swapped begin()).
-    this->m_phy.begin(phy_bus_is_high, phy_bus_assert, phy_bus_release);
+    if (!this->m_phy.begin(static_cast<int>(tx_gpio), static_cast<int>(s_rx_gpio), this->m_invert_tx, this->m_invert_rx,
+                           phy_bus_is_high)) {
+        ESP_LOGE("dali", "Failed to initialize RMT DALI PHY");
+    }
 }
 
-void DaliBusComponent::start_phy_timer() {
-#if defined(USE_ESP32) && defined(ARDUINO)
-    auto* timer = timerBegin(9600000);
-    timerAttachInterrupt(timer, &on_dali_timer);
-    timerAlarm(timer, 1000, true, 0);
-    this->m_timer = timer;
-#else
-    ESP_LOGE("dali", "Sampled DALI PHY requires ESP32 Arduino framework");
-#endif
-}
-
-void DaliBusComponent::stop_phy_timer() {
-#if defined(USE_ESP32) && defined(ARDUINO)
-    if (this->m_timer != nullptr) {
-        auto* timer = static_cast<hw_timer_t*>(this->m_timer);
-        timerEnd(timer);
-        this->m_timer = nullptr;
-    }
-#endif
-    if (s_phy == &this->m_phy) {
-        s_phy = nullptr;
-    }
+void DaliBusComponent::shutdown_phy() {
+    this->m_phy.end();
 }
 
 void DaliBusComponent::setup() {
     this->ensure_bus_mutex();
     this->init_phy();
-    this->start_phy_timer();
-    DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
+    DALI_LOGI("DALI bus ready (RMT PHY, Te=416us)");
 
     this->wait_for_boot_delay();
 
@@ -492,7 +427,7 @@ void DaliBusComponent::setup() {
 }
 
 void DaliBusComponent::on_shutdown() {
-    this->stop_phy_timer();
+    this->shutdown_phy();
 }
 
 void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t long_addr) {
@@ -525,10 +460,6 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
     light_state->set_restore_mode(light::LIGHT_RESTORE_DEFAULT_ON);
     light_state->add_effects({});
 
-    // setup_state() runs when the LightState component starts (API/MQTT ready).
-    // Do not call it here — 18 immediate bus queries during bus setup can block
-    // entity registration and trip the watchdog.
-
     if (m_dynamic_lights.empty()) {
         this->enable_loop();
     }
@@ -541,7 +472,6 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 }
 
 void DaliBusComponent::loop() {
-    this->update_isr_rate();
     this->log_phy_snapshot(false);
 
     for (auto* light : m_dynamic_lights) {
@@ -554,7 +484,9 @@ void DaliBusComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "DALI Bus:");
     LOG_PIN("  TX Pin: ", m_txPin);
     LOG_PIN("  RX Pin: ", m_rxPin);
-    ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz), driver v2");
+    ESP_LOGCONFIG(TAG, "  PHY: RMT (Te=416us), driver v3");
+    ESP_LOGCONFIG(TAG, "  Invert TX: %s", m_invert_tx ? "yes" : "no");
+    ESP_LOGCONFIG(TAG, "  Invert RX: %s", m_invert_rx ? "yes" : "no");
     ESP_LOGCONFIG(TAG, "  Boot delay: %u ms", m_boot_delay_ms);
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
     if (m_discovery) {
@@ -572,10 +504,10 @@ void DaliBusComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Debug TX/RX: %s", m_debug_tx_rx ? "enabled" : "disabled");
     ESP_LOGCONFIG(TAG, "  TX errors: %u", m_tx_error_count);
     ESP_LOGCONFIG(TAG, "  TX silent: %u", m_tx_silent_count);
-    ESP_LOGCONFIG(TAG, "  ISR rate: %u/s", m_isr_rate);
     dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
-    ESP_LOGCONFIG(TAG, "  PHY state: %s, idlecnt=%u, rx=%u, tx_act=%u",
-                  phy_busstate_name(snap.busstate), snap.idlecnt, snap.rx_gpio_level, snap.last_tx_bus_active);
+    ESP_LOGCONFIG(TAG, "  PHY state: %s, idle=%ums, rx=%u, tx=%u, tx_act=%u",
+                  phy_busstate_name(snap.busstate), snap.idle_ms, snap.rx_gpio_level, snap.tx_count,
+                  snap.last_tx_bus_active);
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
@@ -597,10 +529,11 @@ void DaliBusComponent::dump_config() {
 
 void DaliBusComponent::resetBus() {
     DALI_LOGD("Resetting bus");
-    this->m_txPin->digital_write(true);
+    this->m_phy.end();
+    this->m_txPin->digital_write(this->m_invert_tx);
     delay(1000);
     this->m_txPin->digital_write(false);
-    this->m_phy.begin(phy_bus_is_high, phy_bus_assert, phy_bus_release);
+    this->init_phy();
 }
 
 void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
