@@ -162,7 +162,12 @@ void DaliBusComponent::setup() {
                         duplicate_detected = true;
                     }
                     else {
-                        short_addr++;
+                        short_addr = this->find_free_short_addr(is_discovered);
+                        if (short_addr > ADDR_SHORT_MAX) {
+                            DALI_LOGE("  No free short address available");
+                            dali.bus_manager.withdrawCurrentDevice();
+                            continue;
+                        }
                         DALI_LOGD("  Duplicate short address detected, assigning a new address: %.2x", short_addr);
 
                         if (!dali.bus_manager.programShortAddress(short_addr)) {
@@ -171,6 +176,7 @@ void DaliBusComponent::setup() {
                             short_addr = 0xFF;
                             continue;
                         }
+                        is_discovered[short_addr] = true;
                     }
                 }
                 else {
@@ -199,7 +205,12 @@ void DaliBusComponent::setup() {
                     continue;
                 }
                 else {
-                    short_addr = count;
+                    short_addr = this->find_free_short_addr(is_discovered);
+                    if (short_addr > ADDR_SHORT_MAX) {
+                        DALI_LOGE("  No free short address available for %.6x", long_addr);
+                        dali.bus_manager.withdrawCurrentDevice();
+                        continue;
+                    }
                     DALI_LOGI("  Assigning short address: %.2x", short_addr);
 
                     if (!dali.bus_manager.programShortAddress(short_addr)) {
@@ -211,6 +222,7 @@ void DaliBusComponent::setup() {
 
                     dali.bus_manager.withdrawCurrentDevice();
 
+                    is_discovered[short_addr] = true;
                     DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
                     if (!this->is_addr_reserved_yaml(short_addr) && m_addresses[short_addr] == 0) {
                         this->register_discovered_addr(short_addr, long_addr);
@@ -248,8 +260,8 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
     const int MAX_STR_LEN = 32;
     char* name = new char[MAX_STR_LEN];
     char* id = new char[MAX_STR_LEN];
-    snprintf(name, MAX_STR_LEN, "DALI %.6x", static_cast<unsigned>(long_addr));
-    snprintf(id, MAX_STR_LEN, "dali_%.6x", static_cast<unsigned>(long_addr));
+    snprintf(name, MAX_STR_LEN, "DALI %u", static_cast<unsigned>(short_addr));
+    snprintf(id, MAX_STR_LEN, "dali_%u", static_cast<unsigned>(short_addr));
 
     auto* light_state = new DynamicDaliLightState { dali_light };
     light_state->configure_dynamic_entity(name, id, false);

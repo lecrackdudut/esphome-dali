@@ -59,6 +59,7 @@ uint8_t DaliBusManager::autoAssignShortAddresses(uint8_t assign, bool reset) {
             DALI_LOGW("Skipping verification for 0x%.6x (no short address)", found_long);
         }
 
+        withdrawCurrentDevice();
         count++;
     }
 

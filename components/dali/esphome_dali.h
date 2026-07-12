@@ -62,6 +62,15 @@ public:
         return short_addr <= ADDR_SHORT_MAX && m_addresses[short_addr] == 0xFFFFFF;
     }
 
+    short_addr_t find_free_short_addr(const bool is_discovered[ADDR_SHORT_MAX + 1]) const {
+        for (short_addr_t i = 0; i <= ADDR_SHORT_MAX; i++) {
+            if (!is_discovered[i] && !this->is_addr_reserved_yaml(i)) {
+                return i;
+            }
+        }
+        return 0xFF;
+    }
+
     DaliMaster dali;
 
 public: // DaliPort
