@@ -5,6 +5,10 @@
 #include "esphome_dali_light.h"
 #include "port.h"
 
+#ifdef USE_NETWORK
+#include "esphome/components/network/util.h"
+#endif
+
 #if defined(USE_ESP32) && defined(ARDUINO)
 #include <esp32-hal-timer.h>
 #endif
@@ -101,7 +105,30 @@ void DaliBusComponent::stop_phy_timer() {
 void DaliBusComponent::setup() {
     this->init_phy();
     this->start_phy_timer();
-    DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
+    DALI_LOGI("DALI PHY ready (sampled @ 9600 Hz)");
+
+    this->m_deferred_init_start_ms = millis();
+    this->m_deferred_init_pending = this->m_discovery || this->m_terminate_on_boot;
+    this->m_deferred_init_done = !this->m_deferred_init_pending;
+
+    if (this->m_deferred_init_pending) {
+        DALI_LOGI("DALI bus init deferred until network is up + boot_delay (%u ms)", this->m_boot_delay_ms);
+        this->enable_loop();
+    } else if (m_dynamic_lights.empty()) {
+        this->disable_loop();
+    }
+}
+
+bool DaliBusComponent::is_network_ready_() const {
+#ifdef USE_NETWORK
+    return network::is_connected();
+#else
+    return true;
+#endif
+}
+
+void DaliBusComponent::run_deferred_bus_init() {
+    DALI_LOGI("Starting DALI bus init...");
 
     if (this->m_terminate_on_boot) {
         DALI_LOGI("Sending TERMINATE to exit initialization mode...");
@@ -116,7 +143,7 @@ void DaliBusComponent::setup() {
         }
 
         if (dali.bus_manager.isControlGearPresent()) {
-            DALI_LOGD("Detected control gear on bus");
+            DALI_LOGI("Detected control gear on bus");
         } else {
             DALI_LOGE("No DALI control gear detected on bus!");
             return;
@@ -239,7 +266,7 @@ void DaliBusComponent::setup() {
             }
         }
 
-        DALI_LOGD("No more devices found!");
+        DALI_LOGI("No more devices found!");
         dali.bus_manager.endAddressScan();
 
         if (duplicate_detected) {
@@ -247,10 +274,11 @@ void DaliBusComponent::setup() {
             DALI_LOGW("  Devices may report inconsistent capabilities.");
             DALI_LOGW("  You should fix your address assignments.");
         }
-    }
 
-    if (m_dynamic_lights.empty()) {
-        this->disable_loop();
+        DALI_LOGI("DALI discovery complete: %u device(s), %u light(s) created, control gear %s",
+                  this->m_discovery_devices_found,
+                  this->m_discovery_lights_created,
+                  dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     }
 }
 
@@ -304,6 +332,23 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 }
 
 void DaliBusComponent::loop() {
+    if (this->m_deferred_init_pending) {
+        if (!this->is_network_ready_()) {
+            return;
+        }
+        if (millis() - this->m_deferred_init_start_ms < this->m_boot_delay_ms) {
+            return;
+        }
+
+        this->m_deferred_init_pending = false;
+        this->run_deferred_bus_init();
+        this->m_deferred_init_done = true;
+
+        if (m_dynamic_lights.empty()) {
+            this->disable_loop();
+        }
+    }
+
     for (auto* light : m_dynamic_lights) {
         light->loop();
     }
@@ -317,6 +362,8 @@ void DaliBusComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  PHY: sampled (9600 Hz), driver v2");
     ESP_LOGCONFIG(TAG, "  Discovery: %s", m_discovery ? "enabled" : "disabled");
     ESP_LOGCONFIG(TAG, "  Terminate on boot: %s", m_terminate_on_boot ? "yes" : "no");
+    ESP_LOGCONFIG(TAG, "  Boot delay: %u ms", m_boot_delay_ms);
+    ESP_LOGCONFIG(TAG, "  Bus init: %s", m_deferred_init_done ? "complete" : "deferred (pending)");
     if (m_discovery) {
         const char *init_mode = "discover only";
         if (m_initialize_addresses == DaliInitMode::InitializeAll) {
@@ -329,7 +376,11 @@ void DaliBusComponent::dump_config() {
         ESP_LOGCONFIG(TAG, "  Devices found: %u", m_discovery_devices_found);
         ESP_LOGCONFIG(TAG, "  Lights created: %u", m_discovery_lights_created);
     }
-    ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
+    if (m_deferred_init_done) {
+        ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
+    } else {
+        ESP_LOGCONFIG(TAG, "  Control Gear: not yet probed (init deferred)");
+    }
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
         if (m_addresses[i] == 0xFFFFFF) {

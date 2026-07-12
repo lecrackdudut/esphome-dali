@@ -45,6 +45,11 @@ public:
     /// @brief Send TERMINATE at boot to exit INITIALISE mode on control gear (e.g. after interrupted discovery).
     void set_terminate_on_boot(bool terminate_on_boot) { m_terminate_on_boot = terminate_on_boot; }
 
+    void set_boot_delay(uint32_t boot_delay_ms) { m_boot_delay_ms = boot_delay_ms; }
+
+    /// @brief True once terminate/discovery has finished (or was not configured).
+    bool is_bus_init_done() const { return m_deferred_init_done; }
+
     // NOTE: Must have a higher priority number than the components that depend on this.
     // ie, this must be initialized first.
     float get_setup_priority() const override { return esphome::setup_priority::HARDWARE; }
@@ -86,6 +91,8 @@ private:
     void start_phy_timer();
     void stop_phy_timer();
     void create_light_component(short_addr_t short_addr, uint32_t long_addr);
+    void run_deferred_bus_init();
+    bool is_network_ready_() const;
 
     dali_phy::DaliPhy m_phy;
     void* m_timer{nullptr};
@@ -95,6 +102,10 @@ private:
 
     bool m_discovery = false;
     bool m_terminate_on_boot = false;
+    bool m_deferred_init_pending = false;
+    bool m_deferred_init_done = false;
+    uint32_t m_boot_delay_ms = 5000;
+    uint32_t m_deferred_init_start_ms = 0;
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 

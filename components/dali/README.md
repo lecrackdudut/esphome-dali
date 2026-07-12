@@ -8,6 +8,14 @@ The PlatformIO library only builds the core dali functionality and ignores the e
 
 With `discovery: true`, each DALI control gear found on the bus gets a Home Assistant light entity named by **short address** (decimal 0–63), e.g. `DALI 5` / `dali_5`.
 
+Discovery and `terminate_on_boot` run **after network connect** plus `boot_delay` (default 5 s) so serial/OTA logs capture the full init sequence:
+
+```yaml
+dali:
+  discovery: true
+  boot_delay: 10s   # extra wait after network (e.g. for DALI PSU or logger)
+```
+
 Commissioning follows the IEC 62386-102 sequence when `initialize_addresses: true`:
 
 1. INITIALISE (unassigned devices)

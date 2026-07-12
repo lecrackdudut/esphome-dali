@@ -11,6 +11,7 @@ AUTO_LOAD = ["light", "output"]
 CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
 CONF_TERMINATE_ON_BOOT = 'terminate_on_boot'
+CONF_BOOT_DELAY = 'boot_delay'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
@@ -27,6 +28,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_DISCOVERY): cv.All(cv.requires_component("light"), cv.boolean),
     cv.Optional(CONF_INITIALIZE_ADDRESSES): cv.boolean,
     cv.Optional(CONF_TERMINATE_ON_BOOT, default=False): cv.boolean,
+    cv.Optional(CONF_BOOT_DELAY, default='5s'): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_MAX_DISCOVERED_LIGHTS, default=DEFAULT_MAX_DISCOVERED_LIGHTS): cv.int_range(
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
@@ -73,3 +75,6 @@ async def to_code(config: OrderedDict):
 
     if config.get(CONF_TERMINATE_ON_BOOT, False):
         cg.add(var.set_terminate_on_boot(True))
+
+    boot_delay = config[CONF_BOOT_DELAY]
+    cg.add(var.set_boot_delay(boot_delay.total_milliseconds))
