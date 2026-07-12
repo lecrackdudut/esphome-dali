@@ -18,6 +18,8 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 namespace dali_phy {
@@ -95,10 +97,10 @@ static void init_symbol_tables() {
 static size_t dali_tx_encode_cb(const void *data, size_t data_size, size_t symbols_written, size_t symbols_free,
                                rmt_symbol_word_t *symbols, bool *done, void *arg) {
   auto *ctx = static_cast<PhyContext *>(arg);
-  if (symbols_free < 10) {
-    return 0;
-  }
   if (symbols_written == 0) {
+    if (symbols_free < 1) {
+      return 0;
+    }
     symbols[0] = *ctx->symbol_one;
     return 1;
   }
@@ -106,6 +108,9 @@ static size_t dali_tx_encode_cb(const void *data, size_t data_size, size_t symbo
   const auto *bytes = static_cast<const uint8_t *>(data);
   const size_t byte_idx = (symbols_written - 1) / 8;
   if (byte_idx < data_size) {
+    if (symbols_free < 8) {
+      return 0;
+    }
     size_t out = 0;
     for (int mask = 0x80; mask != 0; mask >>= 1) {
       symbols[out++] = (bytes[byte_idx] & mask) ? *ctx->symbol_one : *ctx->symbol_zero;
@@ -113,6 +118,9 @@ static size_t dali_tx_encode_cb(const void *data, size_t data_size, size_t symbo
     return out;
   }
 
+  if (symbols_free < 1) {
+    return 0;
+  }
   symbols[0] = *ctx->symbol_stop;
   *done = true;
   return 1;
@@ -276,13 +284,18 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
   this->phy_ctx_ = ctx;
 
   gpio_set_direction(static_cast<gpio_num_t>(rx_gpio), GPIO_MODE_INPUT);
-  gpio_set_direction(static_cast<gpio_num_t>(tx_gpio), GPIO_MODE_OUTPUT);
-  gpio_set_level(static_cast<gpio_num_t>(tx_gpio), invert_tx ? 1 : 0);
 
   if (!this->ensure_channels_created_()) {
     this->end();
     return false;
   }
+
+  if (!this->enable_channels_()) {
+    this->end();
+    return false;
+  }
+
+  this->set_tx_idle_level_();
 
   this->last_ifg_end_ms_ = 0;
   this->tx_count_ = 0;
@@ -297,38 +310,58 @@ bool DaliPhy::begin(int tx_gpio, int rx_gpio, bool invert_tx, bool invert_rx, ui
 }
 
 void DaliPhy::end() {
-  this->disable_channels_();
+  this->destroy_channels_();
 
-  if (this->tx_encoder_ != nullptr) {
-    rmt_del_encoder(this->tx_encoder_);
-    this->tx_encoder_ = nullptr;
-  }
-  if (this->tx_channel_ != nullptr) {
-    rmt_del_channel(this->tx_channel_);
-    this->tx_channel_ = nullptr;
-  }
-  if (this->rx_channel_ != nullptr) {
-    rmt_del_channel(this->rx_channel_);
-    this->rx_channel_ = nullptr;
-  }
-  if (this->rx_queue_ != nullptr) {
-    vQueueDelete(this->rx_queue_);
-    this->rx_queue_ = nullptr;
-  }
   if (this->phy_ctx_ != nullptr) {
     delete static_cast<PhyContext *>(this->phy_ctx_);
     this->phy_ctx_ = nullptr;
   }
 
   this->initialized_ = false;
+  this->channels_enabled_ = false;
   this->channel_state_ = ChannelState::OFF;
 }
 
+void DaliPhy::destroy_channels_() {
+  if (this->tx_channel_ != nullptr) {
+    rmt_tx_wait_all_done(this->tx_channel_, 0);
+  }
+
+  this->disable_channels_();
+
+  if (this->tx_encoder_ != nullptr) {
+    const esp_err_t err = rmt_del_encoder(this->tx_encoder_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "rmt_del_encoder failed: %s", esp_err_to_name(err));
+    }
+    this->tx_encoder_ = nullptr;
+  }
+  if (this->tx_channel_ != nullptr) {
+    const esp_err_t err = rmt_del_channel(this->tx_channel_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "rmt_del_channel TX failed: %s", esp_err_to_name(err));
+    }
+    this->tx_channel_ = nullptr;
+  }
+  if (this->rx_channel_ != nullptr) {
+    const esp_err_t err = rmt_del_channel(this->rx_channel_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "rmt_del_channel RX failed: %s", esp_err_to_name(err));
+    }
+    this->rx_channel_ = nullptr;
+  }
+  if (this->rx_queue_ != nullptr) {
+    vQueueDelete(this->rx_queue_);
+    this->rx_queue_ = nullptr;
+  }
+}
+
 bool DaliPhy::ensure_channels_created_() {
-  if (this->rx_channel_ != nullptr && this->tx_channel_ != nullptr) {
+  if (this->rx_channel_ != nullptr && this->tx_channel_ != nullptr && this->tx_encoder_ != nullptr) {
     return true;
   }
 
+  this->destroy_channels_();
   this->rx_queue_ = xQueueCreate(4, sizeof(rmt_rx_done_event_data_t));
   if (this->rx_queue_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create RX queue");
@@ -343,6 +376,7 @@ bool DaliPhy::ensure_channels_created_() {
   rx_channel_cfg.flags.invert_in = this->invert_rx_ ? 1U : 0U;
   if (rmt_new_rx_channel(&rx_channel_cfg, &this->rx_channel_) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create RX channel");
+    this->destroy_channels_();
     return false;
   }
 
@@ -351,6 +385,7 @@ bool DaliPhy::ensure_channels_created_() {
   };
   if (rmt_rx_register_event_callbacks(this->rx_channel_, &rx_cbs, this->rx_queue_) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register RX callbacks");
+    this->destroy_channels_();
     return false;
   }
 
@@ -365,32 +400,97 @@ bool DaliPhy::ensure_channels_created_() {
   tx_channel_cfg.trans_queue_depth = 4;
   if (rmt_new_tx_channel(&tx_channel_cfg, &this->tx_channel_) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create TX channel");
+    this->destroy_channels_();
     return false;
   }
 
   const rmt_simple_encoder_config_t enc_cfg = {
       .callback = dali_tx_encode_cb,
       .arg = this->phy_ctx_,
+      .min_chunk_size = 8,
   };
   if (rmt_new_simple_encoder(&enc_cfg, &this->tx_encoder_) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create TX encoder");
+    this->destroy_channels_();
     return false;
   }
 
   return true;
 }
 
-void DaliPhy::disable_channels_() {
-  if (this->rx_channel_ != nullptr) {
-    rmt_disable(this->rx_channel_);
+bool DaliPhy::enable_channels_() {
+  if (this->channels_enabled_) {
+    return true;
   }
-  if (this->tx_channel_ != nullptr) {
+  if (this->tx_channel_ == nullptr || this->rx_channel_ == nullptr) {
+    return false;
+  }
+
+  esp_err_t err = rmt_enable(this->tx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(err));
+    return false;
+  }
+  err = rmt_enable(this->rx_channel_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable RX channel: %s", esp_err_to_name(err));
     rmt_disable(this->tx_channel_);
+    return false;
+  }
+
+  this->channels_enabled_ = true;
+  return true;
+}
+
+void DaliPhy::disable_channels_() {
+  if (this->tx_channel_ != nullptr && this->channels_enabled_) {
+    const esp_err_t err = rmt_disable(this->tx_channel_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "rmt_disable TX failed: %s", esp_err_to_name(err));
+    }
+  }
+  if (this->rx_channel_ != nullptr && this->channels_enabled_) {
+    const esp_err_t err = rmt_disable(this->rx_channel_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "rmt_disable RX failed: %s", esp_err_to_name(err));
+    }
   }
   if (this->rx_queue_ != nullptr) {
     xQueueReset(this->rx_queue_);
   }
+  this->channels_enabled_ = false;
   this->channel_state_ = ChannelState::OFF;
+}
+
+void DaliPhy::set_tx_idle_level_() const {
+  if (this->tx_gpio_ < 0) {
+    return;
+  }
+  // Inverted opto: GPIO low releases the bus; non-inverted: GPIO high is idle.
+  gpio_set_level(static_cast<gpio_num_t>(this->tx_gpio_), this->invert_tx_ ? 0 : 1);
+}
+
+void DaliPhy::pulse_bus_reset() {
+  if (!this->initialized_) {
+    return;
+  }
+
+  if (this->tx_channel_ != nullptr) {
+    rmt_tx_wait_all_done(this->tx_channel_, 0);
+  }
+  this->disable_channels_();
+
+  gpio_set_direction(static_cast<gpio_num_t>(this->tx_gpio_), GPIO_MODE_OUTPUT);
+  gpio_set_level(static_cast<gpio_num_t>(this->tx_gpio_), this->invert_tx_ ? 1 : 0);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  this->set_tx_idle_level_();
+
+  this->last_ifg_end_ms_ = 0;
+  this->channel_state_ = ChannelState::OFF;
+
+  if (!this->enable_channels_()) {
+    ESP_LOGE(TAG, "Failed to re-enable RMT channels after bus reset pulse");
+  }
 }
 
 bool DaliPhy::arm_rx_() {
@@ -441,45 +541,45 @@ bool DaliPhy::transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_
     return false;
   }
 
+  if (!this->channels_enabled_ && !this->enable_channels_()) {
+    ESP_LOGE(TAG, "TX aborted: RMT channels not enabled");
+    return false;
+  }
+
   const uint8_t byte_count = static_cast<uint8_t>((bitlen + 7U) / 8U);
 
-  if (rmt_enable(this->tx_channel_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to enable TX channel");
-    return false;
-  }
-  if (rmt_enable(this->rx_channel_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to enable RX channel");
-    rmt_disable(this->tx_channel_);
-    return false;
-  }
-
   if (!this->arm_rx_()) {
-    rmt_disable(this->rx_channel_);
-    rmt_disable(this->tx_channel_);
     return false;
   }
 
   this->channel_state_ = ChannelState::TX;
-  const rmt_transmit_config_t tx_cfg = {.loop_count = 0};
+  const rmt_transmit_config_t tx_cfg = {
+      .loop_count = 0,
+      .flags =
+          {
+              .eot_level = this->invert_tx_ ? 0U : 1U,
+          },
+  };
   esp_err_t tx_err = rmt_transmit(this->tx_channel_, this->tx_encoder_, data, byte_count, &tx_cfg);
   if (tx_err == ESP_OK) {
     tx_err = rmt_tx_wait_all_done(this->tx_channel_, timeout_ms);
   }
 
-  this->tx_count_++;
-
   if (tx_err != ESP_OK) {
     ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(tx_err));
-    this->disable_channels_();
+    rmt_tx_wait_all_done(this->tx_channel_, 0);
+    this->channel_state_ = ChannelState::OFF;
     return false;
   }
+
+  this->tx_count_++;
 
   bool bus_active = this->read_rx_level_() == 0;
   rmt_rx_done_event_data_t rx_data;
   if (xQueueReceive(this->rx_queue_, &rx_data, 0) == pdTRUE) {
     bus_active = bus_active || rx_data.num_symbols > 0;
     if (!this->arm_rx_()) {
-      this->disable_channels_();
+      this->channel_state_ = ChannelState::OFF;
       return false;
     }
   }
@@ -530,10 +630,9 @@ bool DaliPhy::poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_deco
 }
 
 void DaliPhy::apply_ifg_() {
-  this->disable_channels_();
+  this->channel_state_ = ChannelState::OFF;
   vTaskDelay(pdMS_TO_TICKS(DALI_IFG_MS));
   this->last_ifg_end_ms_ = this->milli_();
-  this->channel_state_ = ChannelState::OFF;
 }
 
 uint8_t DaliPhy::tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {

@@ -78,6 +78,9 @@ class DaliPhy {
 
   void end();
 
+  /// Drive the bus low for 1s then release, without destroying RMT channels.
+  void pulse_bus_reset();
+
   /// Blocking transmit; waits for inter-frame gap, then sends Manchester frame.
   uint8_t tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms = 500);
 
@@ -97,12 +100,15 @@ class DaliPhy {
   enum class ChannelState : uint8_t { OFF = 0, ARMED = 1, TX = 3 };
 
   bool ensure_channels_created_();
+  void destroy_channels_();
   void disable_channels_();
+  bool enable_channels_();
   bool arm_rx_();
   bool wait_ifg_(uint32_t timeout_ms);
   bool transmit_forward_(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms);
   bool poll_rx_event_(uint32_t wait_ms, uint8_t *out_byte, bool *out_decode_error);
   void apply_ifg_();
+  void set_tx_idle_level_() const;
   uint32_t milli_() const;
   uint8_t read_rx_level_() const;
 
@@ -131,6 +137,7 @@ class DaliPhy {
   BackwardResultType last_backward_type_{BACKWARD_TIMEOUT};
   uint8_t last_backward_data_{0};
   bool initialized_{false};
+  bool channels_enabled_{false};
 };
 
 }  // namespace dali_phy

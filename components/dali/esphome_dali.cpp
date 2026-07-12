@@ -272,9 +272,7 @@ void DaliBusComponent::init_phy() {
     s_rx_gpio = pin_to_gpio(this->m_rxPin);
     const gpio_num_t tx_gpio = pin_to_gpio(this->m_txPin);
 
-    this->m_txPin->pin_mode(gpio::Flags::FLAG_OUTPUT);
     this->m_rxPin->pin_mode(gpio::Flags::FLAG_INPUT);
-    this->m_txPin->digital_write(false);
 
     if (!this->m_phy.begin(static_cast<int>(tx_gpio), static_cast<int>(s_rx_gpio), this->m_invert_tx, this->m_invert_rx,
                            phy_bus_is_high)) {
@@ -529,11 +527,7 @@ void DaliBusComponent::dump_config() {
 
 void DaliBusComponent::resetBus() {
     DALI_LOGD("Resetting bus");
-    this->m_phy.end();
-    this->m_txPin->digital_write(this->m_invert_tx);
-    delay(1000);
-    this->m_txPin->digital_write(false);
-    this->init_phy();
+    this->m_phy.pulse_bus_reset();
 }
 
 void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
