@@ -8,8 +8,9 @@
 
 namespace dali_phy {
 
-// Require this many idle samples before transmit (~1.35 ms at 9600 Hz).
-static constexpr uint8_t BEFORE_CMD_IDLE_SAMPLES = 13;
+// DALI spec: >22Te (~9.2 ms) idle before forward frame without backward response.
+// At 9600 Hz sampling: 90 samples ≈ 9.4 ms.
+static constexpr uint8_t BEFORE_CMD_IDLE_SAMPLES = 90;
 
 #define IDLE 0
 #define RX 1
@@ -60,16 +61,34 @@ const char *phy_result_name(uint8_t code) {
   }
 }
 
+const char *backward_result_name(BackwardResultType type) {
+  switch (type) {
+    case BACKWARD_TIMEOUT:
+      return "timeout";
+    case BACKWARD_DECODE_ERROR:
+      return "decode_error";
+    case BACKWARD_REPLY:
+      return "reply";
+    default:
+      return "unknown";
+  }
+}
+
 PhySnapshot DaliPhy::get_snapshot() const {
   PhySnapshot snap{};
   snap.busstate = this->busstate;
   snap.idlecnt = this->idlecnt;
   snap.txcollision = this->txcollision;
   snap.rx_gpio_level = this->bus_is_high != nullptr ? this->bus_is_high() : 0;
+  snap.isr_ticks = this->isr_ticks;
+  snap.last_tx_bus_active = this->last_tx_bus_active;
+  snap.last_backward_type = static_cast<BackwardResultType>(this->last_backward_type);
+  snap.last_backward_data = this->last_backward_data;
   return snap;
 }
 
 void DaliPhy::timer() {
+  this->isr_ticks++;
   uint8_t busishigh = (this->bus_is_high() ? 1 : 0);
 
   switch (this->busstate) {
@@ -109,6 +128,8 @@ void DaliPhy::timer() {
       }
       break;
     case TX:
+      if (!busishigh)
+        this->tx_bus_active = 1;
       if (this->txhbcnt >= this->txhblen) {
         this->_set_busstate_idle();
       } else {
@@ -139,6 +160,7 @@ void DaliPhy::timer() {
       }
       break;
     case COLLISION_TX:
+      this->tx_bus_active = 1;
       this->bus_set_low();
       this->txspcnt++;
       if (this->txspcnt >= 16)
@@ -176,6 +198,7 @@ uint8_t DaliPhy::tx(uint8_t *data, uint8_t bitlen) {
   this->txhbcnt = 0;
   this->txspcnt = 0;
   this->txcollision = 0;
+  this->tx_bus_active = 0;
   this->rxstate = EMPTY;
   this->rxpos = 0;
   this->rxbitcnt = 0;
@@ -308,6 +331,7 @@ uint8_t DaliPhy::tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
         return DALI_PHY_RESULT_TIMEOUT;
     }
     if (rv == DALI_PHY_OK) {
+      this->last_tx_bus_active = this->tx_bus_active;
       int64_t start_us = esp_timer_get_time();
       while (esp_timer_get_time() - start_us < 1000)
         __asm__ __volatile__("nop");
@@ -316,7 +340,7 @@ uint8_t DaliPhy::tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
   }
 }
 
-uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
+BackwardResult DaliPhy::receive_backward_detailed(uint32_t timeout_ms) {
   uint8_t data[4];
   uint32_t rx_start_ms = this->milli();
   uint32_t rx_timeout_ms = timeout_ms < 10 ? timeout_ms : 10;
@@ -330,15 +354,32 @@ uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
         rx_timeout_ms = timeout_ms < 25 ? timeout_ms : 25;
         break;
       case 2:
-        return 0;
+        this->last_backward_type = BACKWARD_DECODE_ERROR;
+        this->last_backward_data = 0;
+        return {BACKWARD_DECODE_ERROR, 0};
       default:
-        if (rv == 8)
-          return data[0];
-        return 0;
+        if (rv == 8) {
+          this->last_backward_type = BACKWARD_REPLY;
+          this->last_backward_data = data[0];
+          return {BACKWARD_REPLY, data[0]};
+        }
+        this->last_backward_type = BACKWARD_DECODE_ERROR;
+        this->last_backward_data = 0;
+        return {BACKWARD_DECODE_ERROR, 0};
     }
-    if (this->milli() - rx_start_ms > rx_timeout_ms)
-      return 0;
+    if (this->milli() - rx_start_ms > rx_timeout_ms) {
+      this->last_backward_type = BACKWARD_TIMEOUT;
+      this->last_backward_data = 0;
+      return {BACKWARD_TIMEOUT, 0};
+    }
   }
+}
+
+uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
+  BackwardResult result = this->receive_backward_detailed(timeout_ms);
+  if (result.type == BACKWARD_REPLY)
+    return result.data;
+  return 0;
 }
 
 }  // namespace dali_phy

@@ -7,8 +7,9 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 
 from . import binary_sensor as dali_binary_sensor
+from . import text_sensor as dali_text_sensor
 
-AUTO_LOAD = ["light", "output", "binary_sensor"]
+AUTO_LOAD = ["light", "output", "binary_sensor", "text_sensor"]
 
 CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
@@ -33,6 +34,7 @@ CONFIG_SCHEMA = cv.Schema({
     ),
     cv.Optional(CONF_DEBUG_TX_RX, default=False): cv.boolean,
     cv.Optional(dali_binary_sensor.CONF_BUS_STATUS): dali_binary_sensor.bus_status_schema(dali_ns),
+    cv.Optional(dali_text_sensor.CONF_DIAG): dali_text_sensor.diag_schema(dali_ns),
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config: OrderedDict):
@@ -79,3 +81,6 @@ async def to_code(config: OrderedDict):
 
     if dali_binary_sensor.CONF_BUS_STATUS in config:
         await dali_binary_sensor.register_bus_status(var, config)
+
+    if dali_text_sensor.CONF_DIAG in config:
+        await dali_text_sensor.register_diag(var, config)

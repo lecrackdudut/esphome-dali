@@ -113,12 +113,65 @@ void DaliBusComponent::log_phy_snapshot(bool force) {
     this->m_last_phy_log_ms = now;
     this->m_last_logged_busstate = snap.busstate;
 
-    DALI_LOGD("PHY state=%s idlecnt=%u rx=%u collisions=%u tx_errors=%u",
+    DALI_LOGD("PHY state=%s idlecnt=%u rx=%u collisions=%u tx_errors=%u tx_silent=%u isr=%u/s",
               phy_busstate_name(snap.busstate),
               snap.idlecnt,
               snap.rx_gpio_level,
               snap.txcollision,
-              this->m_tx_error_count);
+              this->m_tx_error_count,
+              this->m_tx_silent_count,
+              this->m_isr_rate);
+}
+
+void DaliBusComponent::update_isr_rate() {
+    const uint32_t now = millis();
+    dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
+
+    if (this->m_last_isr_sample_ms == 0) {
+        this->m_last_isr_sample_ms = now;
+        this->m_last_isr_ticks = snap.isr_ticks;
+        return;
+    }
+
+    const uint32_t elapsed = now - this->m_last_isr_sample_ms;
+    if (elapsed < 1000) {
+        return;
+    }
+
+    const uint32_t delta = snap.isr_ticks - this->m_last_isr_ticks;
+    this->m_isr_rate = (delta * 1000U) / elapsed;
+    this->m_last_isr_sample_ms = now;
+    this->m_last_isr_ticks = snap.isr_ticks;
+
+    if (this->m_isr_rate < 9000 || this->m_isr_rate > 10200) {
+        DALI_LOGW("ISR tick rate out of range: %u/s (expected ~9600)", this->m_isr_rate);
+    }
+}
+
+const char *DaliBusComponent::build_diag_string(char *buf, size_t buflen) const {
+    dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
+    snprintf(buf, buflen,
+             "isr=%u/s phy=%s rx=%u idle=%u tx_act=%u rx_last=%s(%02x) fail=%u tx_err=%u silent=%u",
+             this->m_isr_rate,
+             phy_busstate_name(snap.busstate),
+             snap.rx_gpio_level,
+             snap.idlecnt,
+             snap.last_tx_bus_active,
+             dali_phy::backward_result_name(snap.last_backward_type),
+             snap.last_backward_data,
+             this->m_consecutive_bus_failures,
+             this->m_tx_error_count,
+             this->m_tx_silent_count);
+    return buf;
+}
+
+void DaliBusComponent::publish_diagnostics() {
+    if (this->m_diag_sensor == nullptr) {
+        return;
+    }
+    char buf[160];
+    this->build_diag_string(buf, sizeof(buf));
+    this->m_diag_sensor->publish_state(buf);
 }
 
 bool DaliBusComponent::check_bus_health() {
@@ -127,19 +180,26 @@ bool DaliBusComponent::check_bus_health() {
         return false;
     }
 
-    dali.bus_manager.terminate();
-    delay(10);
     const bool present = dali.bus_manager.isControlGearPresent();
+    const dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
     this->unlock_bus();
 
     this->log_phy_snapshot(false);
+    this->publish_diagnostics();
 
     if (present) {
         this->m_consecutive_bus_failures = 0;
     } else {
         this->m_consecutive_bus_failures++;
-        DALI_LOGW("Bus health check failed (%u consecutive)", this->m_consecutive_bus_failures);
-        if (this->m_consecutive_bus_failures >= BUS_STATUS_FAILURE_THRESHOLD) {
+        DALI_LOGW("Bus health check failed (%u consecutive): rx_last=%s(%02x) tx_act=%u isr=%u/s",
+                  this->m_consecutive_bus_failures,
+                  dali_phy::backward_result_name(snap.last_backward_type),
+                  snap.last_backward_data,
+                  snap.last_tx_bus_active,
+                  this->m_isr_rate);
+        const uint32_t now = millis();
+        if (this->m_consecutive_bus_failures >= BUS_STATUS_FAILURE_THRESHOLD &&
+            (this->m_last_recovery_ms == 0 || now - this->m_last_recovery_ms >= RECOVERY_COOLDOWN_MS)) {
             this->attempt_bus_recovery();
         }
     }
@@ -149,6 +209,7 @@ bool DaliBusComponent::check_bus_health() {
 }
 
 void DaliBusComponent::attempt_bus_recovery() {
+    this->m_last_recovery_ms = millis();
     DALI_LOGW("Attempting DALI bus recovery (reset + terminate)");
     if (!this->lock_bus()) {
         DALI_LOGW("Bus recovery skipped: could not acquire bus lock");
@@ -164,6 +225,7 @@ void DaliBusComponent::attempt_bus_recovery() {
     this->unlock_bus();
 
     this->log_phy_snapshot(true);
+    this->publish_diagnostics();
 
     if (present) {
         DALI_LOGI("Bus recovery succeeded");
@@ -200,6 +262,27 @@ void DaliBusStatusBinarySensor::loop() {
     }
     this->last_update_ms_ = now;
     this->parent_->check_bus_health();
+}
+
+void DaliDiagTextSensor::setup() {
+    if (this->parent_ == nullptr) {
+        return;
+    }
+    this->last_update_ms_ = millis();
+    this->parent_->publish_diagnostics();
+}
+
+void DaliDiagTextSensor::loop() {
+    if (this->parent_ == nullptr) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (now - this->last_update_ms_ < this->update_interval_ms_) {
+        return;
+    }
+    this->last_update_ms_ = now;
+    this->parent_->publish_diagnostics();
 }
 
 void DaliBusComponent::init_phy() {
@@ -428,6 +511,7 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 }
 
 void DaliBusComponent::loop() {
+    this->update_isr_rate();
     this->log_phy_snapshot(false);
 
     for (auto* light : m_dynamic_lights) {
@@ -456,9 +540,11 @@ void DaliBusComponent::dump_config() {
     }
     ESP_LOGCONFIG(TAG, "  Debug TX/RX: %s", m_debug_tx_rx ? "enabled" : "disabled");
     ESP_LOGCONFIG(TAG, "  TX errors: %u", m_tx_error_count);
+    ESP_LOGCONFIG(TAG, "  TX silent: %u", m_tx_silent_count);
+    ESP_LOGCONFIG(TAG, "  ISR rate: %u/s", m_isr_rate);
     dali_phy::PhySnapshot snap = this->m_phy.get_snapshot();
-    ESP_LOGCONFIG(TAG, "  PHY state: %s, idlecnt=%u, rx=%u",
-                  phy_busstate_name(snap.busstate), snap.idlecnt, snap.rx_gpio_level);
+    ESP_LOGCONFIG(TAG, "  PHY state: %s, idlecnt=%u, rx=%u, tx_act=%u",
+                  phy_busstate_name(snap.busstate), snap.idlecnt, snap.rx_gpio_level, snap.last_tx_bus_active);
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
@@ -502,8 +588,12 @@ void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
     if (result != DALI_PHY_OK) {
         this->m_tx_error_count++;
         DALI_LOGW("TX failed (%s): %02x %02x", dali_phy::phy_result_name(result), address, data);
+    } else if (!this->m_phy.get_last_tx_bus_active()) {
+        this->m_tx_silent_count++;
+        DALI_LOGW("TX silent (no bus activity on RX): %02x %02x", address, data);
     }
 
+    this->publish_diagnostics();
     this->unlock_bus();
 }
 
@@ -513,12 +603,21 @@ uint8_t DaliBusComponent::receiveBackwardFrame(unsigned long timeout_ms) {
         return 0;
     }
 
-    const uint8_t data = this->m_phy.receive_backward(timeout_ms);
+    const dali_phy::BackwardResult result = this->m_phy.receive_backward_detailed(timeout_ms);
 
     if (this->m_debug_tx_rx) {
-        DALI_LOGD("RX: %02x", data);
+        if (result.type == dali_phy::BACKWARD_REPLY) {
+            DALI_LOGD("RX: %02x (%s)", result.data, dali_phy::backward_result_name(result.type));
+        } else {
+            DALI_LOGD("RX: -- (%s)", dali_phy::backward_result_name(result.type));
+        }
     }
 
+    this->publish_diagnostics();
     this->unlock_bus();
-    return data;
+
+    if (result.type == dali_phy::BACKWARD_REPLY) {
+        return result.data;
+    }
+    return 0;
 }

@@ -30,15 +30,32 @@ namespace dali_phy {
 
 #define DALI_PHY_RX_BUF_SIZE 40
 
+/// Result of a backward-frame receive attempt.
+enum BackwardResultType : uint8_t {
+  BACKWARD_TIMEOUT = 0,
+  BACKWARD_DECODE_ERROR = 1,
+  BACKWARD_REPLY = 2,
+};
+
+struct BackwardResult {
+  BackwardResultType type;
+  uint8_t data;
+};
+
 /// Snapshot of PHY state for diagnostics (read from main thread only).
 struct PhySnapshot {
   uint8_t busstate;
   uint8_t idlecnt;
   uint8_t txcollision;
   uint8_t rx_gpio_level;
+  uint32_t isr_ticks;
+  uint8_t last_tx_bus_active;
+  BackwardResultType last_backward_type;
+  uint8_t last_backward_data;
 };
 
 const char *phy_result_name(uint8_t code);
+const char *backward_result_name(BackwardResultType type);
 
 /// Low-level DALI physical layer: 9600 Hz oversampled TX/RX with Manchester decode.
 /// Ported from qqqlab DALI_Lib (ESP32-S3-Pico-DALI reference).
@@ -58,8 +75,14 @@ class DaliPhy {
   /// Poll receiver after a forward frame; returns reply byte or 0 on timeout/NACK.
   uint8_t receive_backward(uint32_t timeout_ms = 100);
 
+  /// Poll receiver with explicit result classification.
+  BackwardResult receive_backward_detailed(uint32_t timeout_ms = 100);
+
   /// Read volatile PHY fields and current RX GPIO level (main thread only).
   PhySnapshot get_snapshot() const;
+
+  /// True if the last completed TX was observed modulating the bus (RX saw line low).
+  uint8_t get_last_tx_bus_active() const { return this->last_tx_bus_active; }
 
   uint8_t txcollisionhandling{DALI_PHY_TX_COLLISION_AUTO};
 
@@ -82,6 +105,11 @@ class DaliPhy {
   volatile uint8_t txspcnt{0};
   volatile uint8_t txhigh{0};
   volatile uint8_t txcollision{0};
+  volatile uint32_t isr_ticks{0};
+  volatile uint8_t tx_bus_active{0};
+  volatile uint8_t last_tx_bus_active{0};
+  volatile uint8_t last_backward_type{BACKWARD_TIMEOUT};
+  volatile uint8_t last_backward_data{0};
 
   uint8_t (*bus_is_high)(){nullptr};
   void (*bus_set_low)(){nullptr};
