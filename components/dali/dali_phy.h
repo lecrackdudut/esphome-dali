@@ -48,6 +48,12 @@ class DaliPhy {
   /// Poll receiver after a forward frame; returns reply byte or 0 on timeout/NACK.
   uint8_t receive_backward(uint32_t timeout_ms = 100);
 
+  /// Same as receive_backward, but also returns a DALI_PHY_RESULT_* status code.
+  uint8_t receive_backward_ex(uint8_t *out_data, uint32_t timeout_ms = 100);
+
+  /// Result of the last receive_backward / receive_backward_ex call.
+  uint8_t last_rx_result() const { return last_rx_result_; }
+
   uint8_t txcollisionhandling{DALI_PHY_TX_COLLISION_AUTO};
 
  private:
@@ -73,6 +79,8 @@ class DaliPhy {
   uint8_t (*bus_is_high)(){nullptr};
   void (*bus_set_low)(){nullptr};
   void (*bus_set_high)(){nullptr};
+
+  uint8_t last_rx_result_{DALI_PHY_RESULT_NO_REPLY};
 
   void _set_busstate_idle();
   void _init();

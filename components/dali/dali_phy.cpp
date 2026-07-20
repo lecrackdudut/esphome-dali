@@ -284,7 +284,7 @@ uint8_t DaliPhy::tx_wait(uint8_t *data, uint8_t bitlen, uint32_t timeout_ms) {
   }
 }
 
-uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
+uint8_t DaliPhy::receive_backward_ex(uint8_t *out_data, uint32_t timeout_ms) {
   uint8_t data[4];
   uint32_t rx_start_ms = this->milli();
   uint32_t rx_timeout_ms = timeout_ms < 10 ? timeout_ms : 10;
@@ -298,15 +298,36 @@ uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
         rx_timeout_ms = timeout_ms < 25 ? timeout_ms : 25;
         break;
       case 2:
-        return 0;
+        this->last_rx_result_ = DALI_PHY_RESULT_INVALID_REPLY;
+        if (out_data != nullptr)
+          *out_data = 0;
+        return this->last_rx_result_;
       default:
-        if (rv == 8)
-          return data[0];
-        return 0;
+        if (rv == 8) {
+          this->last_rx_result_ = DALI_PHY_OK;
+          if (out_data != nullptr)
+            *out_data = data[0];
+          return DALI_PHY_OK;
+        }
+        this->last_rx_result_ = DALI_PHY_RESULT_INVALID_REPLY;
+        if (out_data != nullptr)
+          *out_data = 0;
+        return this->last_rx_result_;
     }
-    if (this->milli() - rx_start_ms > rx_timeout_ms)
-      return 0;
+    if (this->milli() - rx_start_ms > rx_timeout_ms) {
+      this->last_rx_result_ = DALI_PHY_RESULT_NO_REPLY;
+      if (out_data != nullptr)
+        *out_data = 0;
+      return this->last_rx_result_;
+    }
   }
+}
+
+uint8_t DaliPhy::receive_backward(uint32_t timeout_ms) {
+  uint8_t data = 0;
+  if (this->receive_backward_ex(&data, timeout_ms) == DALI_PHY_OK)
+    return data;
+  return 0;
 }
 
 }  // namespace dali_phy

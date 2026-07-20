@@ -103,6 +103,13 @@ void DaliBusComponent::setup() {
     this->start_phy_timer();
     DALI_LOGI("DALI bus ready (sampled PHY @ 9600 Hz)");
 
+#ifdef USE_DALI_DEBUG
+    if (this->m_debug) {
+        this->m_debug_hub.setup(this);
+        this->enable_loop();
+    }
+#endif
+
     if (m_discovery) {
         if (false) {
             this->resetBus();
@@ -243,7 +250,11 @@ void DaliBusComponent::setup() {
         }
     }
 
-    if (m_dynamic_lights.empty()) {
+    if (m_dynamic_lights.empty()
+#ifdef USE_DALI_DEBUG
+        && !this->m_debug
+#endif
+    ) {
         this->disable_loop();
     }
 }
@@ -298,6 +309,11 @@ void DaliBusComponent::create_light_component(short_addr_t short_addr, uint32_t 
 }
 
 void DaliBusComponent::loop() {
+#ifdef USE_DALI_DEBUG
+    if (this->m_debug) {
+        this->m_debug_hub.loop();
+    }
+#endif
     for (auto* light : m_dynamic_lights) {
         light->loop();
     }
@@ -323,6 +339,11 @@ void DaliBusComponent::dump_config() {
         ESP_LOGCONFIG(TAG, "  Lights created: %u", m_discovery_lights_created);
     }
     ESP_LOGCONFIG(TAG, "  Control Gear: %s", dali.bus_manager.isControlGearPresent() ? "present" : "not present");
+#ifdef USE_DALI_DEBUG
+    ESP_LOGCONFIG(TAG, "  Debug: %s", m_debug ? "enabled" : "disabled");
+#else
+    ESP_LOGCONFIG(TAG, "  Debug: disabled (not compiled)");
+#endif
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
         if (m_addresses[i] == 0xFFFFFF) {
@@ -355,15 +376,58 @@ void DaliBusComponent::sendForwardFrame(uint8_t address, uint8_t data) {
     }
 
     uint8_t frame[2] = { address, data };
-    this->m_phy.tx_wait(frame, 16, 500);
+    uint8_t result = this->m_phy.tx_wait(frame, 16, 500);
+#ifdef USE_DALI_DEBUG
+    if (this->m_debug) {
+        this->m_debug_hub.on_tx(address, data, result);
+    }
+#else
+    (void) result;
+#endif
 }
 
 uint8_t DaliBusComponent::receiveBackwardFrame(unsigned long timeout_ms) {
-    uint8_t data = this->m_phy.receive_backward(timeout_ms);
+    uint8_t data = 0;
+    uint8_t result = this->m_phy.receive_backward_ex(&data, timeout_ms);
 
     if (DEBUG_LOG_RXTX) {
-        DALI_LOGD("RX: %02x", data);
+        DALI_LOGD("RX: %02x (result=%u)", data, result);
     }
+#ifdef USE_DALI_DEBUG
+    if (this->m_debug) {
+        this->m_debug_hub.on_rx(data, result);
+    }
+#endif
 
-    return data;
+    return (result == DALI_PHY_OK) ? data : 0;
 }
+
+#ifdef USE_DALI_DEBUG
+void DaliBusComponent::run_debug_action(DaliDebugAction action) {
+    if (this->m_debug) {
+        this->m_debug_hub.run_action(action);
+    }
+}
+
+void DaliBusComponent::set_debug_target_addr(short_addr_t addr) {
+    this->m_debug_hub.set_target_addr(addr);
+}
+
+bool DaliBusComponent::debug_rx_is_high() const {
+    if (this->m_rxPin == nullptr)
+        return false;
+    return this->m_rxPin->digital_read();
+}
+
+uint8_t DaliBusComponent::send_query_debug(short_addr_t addr, DaliCommand command, uint8_t *out_data) {
+    this->sendForwardFrame((addr << 1) | DALI_COMMAND, static_cast<uint8_t>(command));
+    uint8_t data = 0;
+    uint8_t result = this->m_phy.receive_backward_ex(&data, 100);
+    if (this->m_debug) {
+        this->m_debug_hub.on_rx(data, result);
+    }
+    if (out_data != nullptr)
+        *out_data = data;
+    return result;
+}
+#endif

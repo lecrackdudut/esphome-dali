@@ -7,6 +7,10 @@
 #include "dali.h"
 #include "dali_phy.h"
 
+#ifdef USE_DALI_DEBUG
+#include "dali_debug.h"
+#endif
+
 namespace esphome {
 namespace dali {
 
@@ -41,6 +45,17 @@ public:
     ///         InitializeAll - all devices on the bus
     /// @note
     void do_initialize_addresses(DaliInitMode mode = DaliInitMode::InitializeUnassigned) { m_initialize_addresses = mode; }
+
+#ifdef USE_DALI_DEBUG
+    /// Enable Home Assistant debug entities (traffic sniffer + command buttons).
+    void enable_debug() { m_debug = true; }
+
+    void run_debug_action(DaliDebugAction action);
+    void set_debug_target_addr(short_addr_t addr);
+    bool debug_rx_is_high() const;
+    /// Send a query and return PHY status; optional out_data receives the reply byte.
+    uint8_t send_query_debug(short_addr_t addr, DaliCommand command, uint8_t *out_data);
+#endif
 
     // NOTE: Must have a higher priority number than the components that depend on this.
     // ie, this must be initialized first.
@@ -91,6 +106,10 @@ private:
     esphome::GPIOPin* m_txPin{nullptr};
 
     bool m_discovery = false;
+#ifdef USE_DALI_DEBUG
+    bool m_debug = false;
+    DaliDebugHub m_debug_hub;
+#endif
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};
 
