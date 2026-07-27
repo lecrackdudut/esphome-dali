@@ -40,10 +40,9 @@ public:
     void do_device_discovery() { m_discovery = true; }
 
     /// @brief Initialize long and short addresses for devices on the bus.
-    /// @param mode 
-    //          InitializeUnassigned - only devices that do not yet have an assigned short address
-    ///         InitializeAll - all devices on the bus
-    /// @note
+    /// @param mode
+    ///         InitializeUnassigned - only devices without a short address get one
+    ///         InitializeAll - factory-style reset: re-randomize and reassign every device
     void do_initialize_addresses(DaliInitMode mode = DaliInitMode::InitializeUnassigned) { m_initialize_addresses = mode; }
 
 #ifdef USE_DALI_DEBUG

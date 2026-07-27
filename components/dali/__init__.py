@@ -34,13 +34,22 @@ DEBUG_BUTTON_COUNT = 16
 dali_ns = cg.esphome_ns.namespace('dali')
 dali_lib_ns = cg.global_ns
 DaliBusComponent = dali_ns.class_('DaliBusComponent', cg.Component)
+DaliInitMode = dali_ns.enum('DaliInitMode', is_class=True)
+
+
+def validate_initialize_addresses(value):
+    """bool (legacy) or 'unassigned' / 'all'."""
+    if isinstance(value, bool):
+        return value
+    return cv.one_of('unassigned', 'all', lower=True)(value)
+
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(DaliBusComponent),
     cv.Required(CONF_RX_PIN): pins.gpio_input_pin_schema,
     cv.Required(CONF_TX_PIN): pins.gpio_output_pin_schema,
     cv.Optional(CONF_DISCOVERY): cv.All(cv.requires_component("light"), cv.boolean),
-    cv.Optional(CONF_INITIALIZE_ADDRESSES): cv.boolean,
+    cv.Optional(CONF_INITIALIZE_ADDRESSES): validate_initialize_addresses,
     cv.Optional(CONF_MAX_DISCOVERED_LIGHTS, default=DEFAULT_MAX_DISCOVERED_LIGHTS): cv.int_range(
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
@@ -83,8 +92,11 @@ async def to_code(config: OrderedDict):
         # Override ESPHOME_COMPONENT_COUNT emitted earlier by esphome core.
         cg.add_define("ESPHOME_COMPONENT_COUNT", base_component_count + max_discovered)
 
-    if config.get(CONF_INITIALIZE_ADDRESSES, False):
-        cg.add(var.do_initialize_addresses())
+    init_addrs = config.get(CONF_INITIALIZE_ADDRESSES, False)
+    if init_addrs is True or init_addrs == 'unassigned':
+        cg.add(var.do_initialize_addresses(DaliInitMode.InitializeUnassigned))
+    elif init_addrs == 'all':
+        cg.add(var.do_initialize_addresses(DaliInitMode.InitializeAll))
 
     if config.get(CONF_DEBUG, False):
         cg.add_define("USE_DALI_DEBUG")

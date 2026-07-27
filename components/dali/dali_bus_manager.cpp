@@ -131,15 +131,21 @@ bool DaliBusManager::findNextAddress(short_addr_t& out_short_addr, uint32_t& out
     _current_addr = addr;
     out_long_addr = addr;
 
-    // Get short address
+    // QUERY_SHORT_ADDRESS reply format is 0AAAAAA1 (IEC 62386-102).
+    // 0x00 = timeout/no reply; 0xFF = MASK (no short address assigned).
     port.sendSpecialCommand(DaliSpecialCommand::QUERY_SHORT_ADDRESS, 0);
-    out_short_addr = port.receiveBackwardFrame();
-    if (out_short_addr == 0) {
+    uint8_t raw = port.receiveBackwardFrame();
+    if (raw == 0) {
         DALI_LOGW("Short address not found for %.6x", addr);
         out_short_addr = 0xFF;
-    }
-    else if (out_short_addr <= ADDR_SHORT_MAX) {
-        out_short_addr >>= 1; // remove command bit
+    } else if (raw == 0xFF) {
+        out_short_addr = 0xFF;
+    } else {
+        out_short_addr = static_cast<short_addr_t>(raw >> 1);
+        if (out_short_addr > ADDR_SHORT_MAX) {
+            DALI_LOGW("Invalid short address response 0x%.2x for %.6x", raw, addr);
+            out_short_addr = 0xFF;
+        }
     }
 
     return true;

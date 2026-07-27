@@ -125,7 +125,7 @@ void DaliBusComponent::setup() {
 
         if (this->m_initialize_addresses != DaliInitMode::DiscoverOnly) {
             if (this->m_initialize_addresses == DaliInitMode::InitializeAll) {
-                DALI_LOGI("Randomizing addresses for *all* DALI devices");
+                DALI_LOGW("Reinitializing ALL DALI short addresses (factory-style reset)");
                 dali.bus_manager.initialize(ASSIGN_ALL);
             }
             else if (this->m_initialize_addresses == DaliInitMode::InitializeUnassigned) {
@@ -159,6 +159,37 @@ void DaliBusComponent::setup() {
             this->m_discovery_devices_found = count;
             delay(1);
             esp_task_wdt_reset();
+
+            // Factory-style reset: ignore previous short addresses and reassign
+            // every device to the next free slot (0,1,2…, skipping YAML-reserved).
+            if (m_initialize_addresses == DaliInitMode::InitializeAll) {
+                short_addr_t new_addr = this->find_free_short_addr(is_discovered);
+                if (new_addr > ADDR_SHORT_MAX) {
+                    DALI_LOGE("  No free short address available for %.6x", long_addr);
+                    dali.bus_manager.withdrawCurrentDevice();
+                    continue;
+                }
+                if (short_addr <= ADDR_SHORT_MAX) {
+                    DALI_LOGI("  Reassigning %.6x: %.2x -> %.2x", long_addr, short_addr, new_addr);
+                } else {
+                    DALI_LOGI("  Assigning short address %.2x to %.6x", new_addr, long_addr);
+                }
+                if (!dali.bus_manager.programShortAddress(new_addr)) {
+                    DALI_LOGE("  Could not program short address");
+                    dali.bus_manager.withdrawCurrentDevice();
+                    continue;
+                }
+                short_addr = new_addr;
+                is_discovered[short_addr] = true;
+                dali.bus_manager.withdrawCurrentDevice();
+                DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
+                if (!this->is_addr_reserved_yaml(short_addr) && m_addresses[short_addr] == 0) {
+                    this->register_discovered_addr(short_addr, long_addr);
+                    create_light_component(short_addr, long_addr);
+                    this->m_discovery_lights_created++;
+                }
+                continue;
+            }
 
             if (short_addr <= ADDR_SHORT_MAX) {
                 DALI_LOGI("  Device %.6x @ %.2x", long_addr, short_addr);
@@ -237,6 +268,10 @@ void DaliBusComponent::setup() {
                         this->m_discovery_lights_created++;
                     }
                 }
+            }
+            else {
+                DALI_LOGW("  Device %.6x: unexpected short address 0x%.2x", long_addr, short_addr);
+                dali.bus_manager.withdrawCurrentDevice();
             }
         }
 
