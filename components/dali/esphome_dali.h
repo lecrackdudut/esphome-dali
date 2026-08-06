@@ -11,6 +11,10 @@
 #include "dali_debug.h"
 #endif
 
+#ifdef USE_DALI_COMMISSIONING
+#include "dali_commissioning.h"
+#endif
+
 namespace esphome {
 namespace dali {
 
@@ -54,6 +58,20 @@ public:
     bool debug_rx_is_high() const;
     /// Send a query and return PHY status; optional out_data receives the reply byte.
     uint8_t send_query_debug(short_addr_t addr, DaliCommand command, uint8_t *out_data);
+#endif
+
+#ifdef USE_DALI_COMMISSIONING
+    /// Enable Home Assistant commissioning entities (groups / fade / scenes).
+    void enable_commissioning() { m_commissioning = true; }
+
+    void run_commissioning_action(DaliCommissioningAction action);
+    void set_commissioning_target_addr(short_addr_t addr);
+    void set_commissioning_group(uint8_t group);
+    void set_commissioning_scene(uint8_t scene);
+    void set_commissioning_fade_time(uint8_t fade_time);
+    void set_commissioning_fade_rate(uint8_t fade_rate);
+    /// Send a query and return PHY status; optional out_data receives the reply byte.
+    uint8_t send_query_commissioning(short_addr_t addr, DaliCommand command, uint8_t *out_data);
 #endif
 
     // NOTE: Must have a higher priority number than the components that depend on this.
@@ -108,6 +126,10 @@ private:
 #ifdef USE_DALI_DEBUG
     bool m_debug = false;
     DaliDebugHub m_debug_hub;
+#endif
+#ifdef USE_DALI_COMMISSIONING
+    bool m_commissioning = false;
+    DaliCommissioningHub m_commissioning_hub;
 #endif
     DaliInitMode m_initialize_addresses = DaliInitMode::DiscoverOnly;
     uint32_t m_addresses[ADDR_SHORT_MAX+1] = {0};

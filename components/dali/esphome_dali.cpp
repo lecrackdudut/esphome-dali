@@ -109,6 +109,11 @@ void DaliBusComponent::setup() {
         this->enable_loop();
     }
 #endif
+#ifdef USE_DALI_COMMISSIONING
+    if (this->m_commissioning) {
+        this->m_commissioning_hub.setup(this);
+    }
+#endif
 
     if (m_discovery) {
         if (false) {
@@ -379,6 +384,11 @@ void DaliBusComponent::dump_config() {
 #else
     ESP_LOGCONFIG(TAG, "  Debug: disabled (not compiled)");
 #endif
+#ifdef USE_DALI_COMMISSIONING
+    ESP_LOGCONFIG(TAG, "  Commissioning: %s", m_commissioning ? "enabled" : "disabled");
+#else
+    ESP_LOGCONFIG(TAG, "  Commissioning: disabled (not compiled)");
+#endif
     bool any = false;
     for (int i = 0; i <= ADDR_SHORT_MAX; i++) {
         if (m_addresses[i] == 0xFFFFFF) {
@@ -461,6 +471,48 @@ uint8_t DaliBusComponent::send_query_debug(short_addr_t addr, DaliCommand comman
     if (this->m_debug) {
         this->m_debug_hub.on_rx(data, result);
     }
+    if (out_data != nullptr)
+        *out_data = data;
+    return result;
+}
+#endif
+
+#ifdef USE_DALI_COMMISSIONING
+void DaliBusComponent::run_commissioning_action(DaliCommissioningAction action) {
+    if (this->m_commissioning) {
+        this->m_commissioning_hub.run_action(action);
+    }
+}
+
+void DaliBusComponent::set_commissioning_target_addr(short_addr_t addr) {
+    this->m_commissioning_hub.set_target_addr(addr);
+}
+
+void DaliBusComponent::set_commissioning_group(uint8_t group) {
+    this->m_commissioning_hub.set_group(group);
+}
+
+void DaliBusComponent::set_commissioning_scene(uint8_t scene) {
+    this->m_commissioning_hub.set_scene(scene);
+}
+
+void DaliBusComponent::set_commissioning_fade_time(uint8_t fade_time) {
+    this->m_commissioning_hub.set_fade_time(fade_time);
+}
+
+void DaliBusComponent::set_commissioning_fade_rate(uint8_t fade_rate) {
+    this->m_commissioning_hub.set_fade_rate(fade_rate);
+}
+
+uint8_t DaliBusComponent::send_query_commissioning(short_addr_t addr, DaliCommand command, uint8_t *out_data) {
+    this->sendForwardFrame((addr << 1) | DALI_COMMAND, static_cast<uint8_t>(command));
+    uint8_t data = 0;
+    uint8_t result = this->m_phy.receive_backward_ex(&data, 100);
+#ifdef USE_DALI_DEBUG
+    if (this->m_debug) {
+        this->m_debug_hub.on_rx(data, result);
+    }
+#endif
     if (out_data != nullptr)
         *out_data = data;
     return result;

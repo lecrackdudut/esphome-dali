@@ -515,6 +515,12 @@ public:
         // }
     }
 
+    /// @brief Query fade time (high nibble) and fade rate (low nibble)
+    /// @return Packed byte: (fade_time << 4) | fade_rate
+    uint8_t queryFadeTimeFadeRate(short_addr_t short_addr) {
+        return port.sendQueryCommand(short_addr, DaliCommand::QUERY_FADE_TIME_FADE_RATE);
+    }
+
     /// @brief Set the power-on level
     /// @param short_addr Device short address
     /// @param power_on_level min..max, or 0
@@ -843,6 +849,18 @@ public:
         port.sendControlCommand(short_addr, cmd);
     }
 
+    /// @brief Query group membership bitmask (bits 0–15 = groups 0–15)
+    uint16_t queryGroups(short_addr_t short_addr) {
+        uint8_t lo = port.sendQueryCommand(short_addr, DaliCommand::QUERY_GROUPS_0_7);
+        uint8_t hi = port.sendQueryCommand(short_addr, DaliCommand::QUERY_GROUPS_8_15);
+        return static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+    }
+
+    /// @brief Query stored level for a scene (0xFF = MASK / not in scene)
+    uint8_t querySceneLevel(short_addr_t short_addr, uint8_t scene) {
+        DaliCommand cmd = static_cast<DaliCommand>((uint8_t)DaliCommand::QUERY_SCENE_LEVEL | (scene & 0x0F));
+        return port.sendQueryCommand(short_addr, cmd);
+    }
 
 private:
     DaliPort& port;

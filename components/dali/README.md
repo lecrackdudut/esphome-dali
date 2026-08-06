@@ -20,7 +20,30 @@ Set `debug: true` on the bus to create diagnostic entities in Home Assistant:
 
 Useful when `Control Gear: not present` — press Query Present / Scan / COMPARE and watch whether replies appear on RX.
 
-Commissioning follows the IEC 62386-102 sequence when `initialize_addresses` is enabled:
+## Commissioning mode
+
+Set `commissioning: true` on the bus to create **config** entities for ballast programming (separate from debug):
+
+- **Numbers**: Comm Target Address (`0–63` / `127`), Group (`0–15`), Scene (`0–15`), Fade Time Set (`0–15`), Fade Rate Set (`1–15`)
+- **Buttons**: Add/Remove group, Query groups, Query/Set fade time & rate, Store/Remove/Query/Goto scene
+- **Results**: Comm Groups (e.g. `0,2,5`), Comm Scene Level (`0–254` or `MASK`), Comm Fade Time / Fade Rate sensors
+
+Typical flow: set target address → set group/scene/fade numbers → press the action button → read result sensors.
+
+**Group control at runtime** does not need commissioning entities — declare a light with a group address (`64–79` = groups `0–15`, i.e. `0x40 | group`):
+
+```yaml
+light:
+  - platform: dali
+    name: "DALI Group 0"
+    address: 64  # group 0
+```
+
+**Scenes** are activated with the **Goto Scene** button (not as `light` entities). Store Scene saves the ballast's current level into the selected scene slot.
+
+## Address assignment
+
+Short-address commissioning follows the IEC 62386-102 sequence when `initialize_addresses` is enabled:
 
 | Value | Behaviour |
 |---|---|

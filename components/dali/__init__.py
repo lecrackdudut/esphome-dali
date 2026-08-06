@@ -20,6 +20,7 @@ CONF_DALI_BUS = 'dali_bus'
 CONF_INITIALIZE_ADDRESSES = 'initialize_addresses'
 CONF_MAX_DISCOVERED_LIGHTS = 'max_discovered_lights'
 CONF_DEBUG = 'debug'
+CONF_COMMISSIONING = 'commissioning'
 
 # DALI short addresses are 0..63; discovery may create one LightState per device.
 DEFAULT_MAX_DISCOVERED_LIGHTS = 64
@@ -30,6 +31,12 @@ DEBUG_SENSOR_COUNT = 8
 DEBUG_BINARY_SENSOR_COUNT = 3
 DEBUG_NUMBER_COUNT = 1
 DEBUG_BUTTON_COUNT = 16
+
+# Must match entities created in DaliCommissioningHub::setup()
+COMMISSIONING_TEXT_SENSOR_COUNT = 2
+COMMISSIONING_SENSOR_COUNT = 2
+COMMISSIONING_NUMBER_COUNT = 5
+COMMISSIONING_BUTTON_COUNT = 10
 
 dali_ns = cg.esphome_ns.namespace('dali')
 dali_lib_ns = cg.global_ns
@@ -54,6 +61,7 @@ CONFIG_SCHEMA = cv.Schema({
         min=1, max=DEFAULT_MAX_DISCOVERED_LIGHTS
     ),
     cv.Optional(CONF_DEBUG, default=False): cv.boolean,
+    cv.Optional(CONF_COMMISSIONING, default=False): cv.boolean,
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config: OrderedDict):
@@ -107,3 +115,11 @@ async def to_code(config: OrderedDict):
         CORE.platform_counts["binary_sensor"] += DEBUG_BINARY_SENSOR_COUNT
         CORE.platform_counts["number"] += DEBUG_NUMBER_COUNT
         CORE.platform_counts["button"] += DEBUG_BUTTON_COUNT
+
+    if config.get(CONF_COMMISSIONING, False):
+        cg.add_define("USE_DALI_COMMISSIONING")
+        cg.add(var.enable_commissioning())
+        CORE.platform_counts["text_sensor"] += COMMISSIONING_TEXT_SENSOR_COUNT
+        CORE.platform_counts["sensor"] += COMMISSIONING_SENSOR_COUNT
+        CORE.platform_counts["number"] += COMMISSIONING_NUMBER_COUNT
+        CORE.platform_counts["button"] += COMMISSIONING_BUTTON_COUNT
